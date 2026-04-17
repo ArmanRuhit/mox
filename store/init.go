@@ -24,7 +24,7 @@ type AccountRemove struct {
 }
 
 // AuthDB and AuthDBTypes are exported for ../backup.go.
-var AuthDB *bstore.DB
+var AuthDB DB
 var AuthDBTypes = []any{TLSPublicKey{}, LoginAttempt{}, LoginAttemptState{}, AccountRemove{}}
 
 var loginAttemptCleanerStop chan chan struct{}
@@ -39,14 +39,15 @@ func Init(ctx context.Context) error {
 	os.MkdirAll(filepath.Dir(p), 0770)
 	opts := bstore.Options{Timeout: 5 * time.Second, Perm: 0660, RegisterLogger: moxvar.RegisterLogger(p, pkglog.Logger)}
 	var err error
-	AuthDB, err = bstore.Open(ctx, p, &opts, AuthDBTypes...)
+	db, err := bstore.Open(ctx, p, &opts, AuthDBTypes...)
 	if err != nil {
 		return err
 	}
+	AuthDB = NewBstoreDB(db)
 
 	// List pending account removals, and process them one by one, committing each
 	// individually.
-	removals, err := bstore.QueryDB[AccountRemove](ctx, AuthDB).List()
+	removals, err := QueryDB[AccountRemove](ctx, AuthDB).List()
 	if err != nil {
 		return fmt.Errorf("listing scheduled account removals: %v", err)
 	}

@@ -9,7 +9,7 @@ import (
 type DB interface {
 	Read(ctx context.Context, fn func (tx Tx) error) error
 	Write(ctx context.Context, fn func (tx Tx) error) error
-	Begin(ctx context.Context, wriable bool) error
+	Begin(ctx context.Context, wriable bool) (Tx, error)
 	Close() error
 	Get(ctx context.Context, v any) error
 	Insert(ctx context.Context, v any) error
@@ -52,21 +52,19 @@ func (q *TypedQuery[T]) FilterEqual(field string, values... any) *TypedQuery[T] 
 
 func (q *TypedQuery[T]) FilterNotEqual(field string, values ...any) *TypedQuery[T] {
 	if q.bq != nil {
-			q.bq = q.bq.FilterNotEqual(field, val)
+			q.bq = q.bq.FilterNotEqual(field, values...)
 	}
 	return q
 }
 
-func (q *TypedQuery[T]) FilterNonzero(v T)
-*TypedQuery[T] {
+func (q *TypedQuery[T]) FilterNonzero(v T) *TypedQuery[T] {
 	if q.bq != nil {
 			q.bq = q.bq.FilterNonzero(v)
 	}
 	return q
 }
 
-func (q *TypedQuery[T]) FilterFn(fn func(T) bool)
-*TypedQuery[T] {
+func (q *TypedQuery[T]) FilterFn(fn func(T) bool) *TypedQuery[T] {
 	if q.bq != nil {
 			q.bq = q.bq.FilterFn(fn)
 	}
@@ -108,18 +106,128 @@ func (q *TypedQuery[T]) FilterIn(field string, value any) *TypedQuery[T] {
 	return q
 }
 
-func (q *TypedQuery[T]) FilterID(id any)
-*TypedQuery[T] {
+func (q *TypedQuery[T]) FilterID(id any) *TypedQuery[T] {
 	if q.bq != nil {
 			q.bq = q.bq.FilterID(id)
 	}
 	return q
 }
 
-func (q *TypedQuery[T]) FilterIDs(ids any)
-*TypedQuery[T] {
+func (q *TypedQuery[T]) FilterIDs(ids any) *TypedQuery[T] {
 	if q.bq != nil {
 			q.bq = q.bq.FilterIDs(ids)
 	}
 	return q
+}
+
+func (q *TypedQuery[T]) SortAsc(fields ...string) *TypedQuery[T] {
+	if q.bq != nil {
+			q.bq = q.bq.SortAsc(fields...)
+	}
+	return q
+}
+
+func (q *TypedQuery[T]) SortDesc(fields ...string) *TypedQuery[T] {
+	if q.bq != nil {
+			q.bq = q.bq.SortDesc(fields...)
+	}
+	return q
+}
+
+func (q *TypedQuery[T]) Limit(n int) *TypedQuery[T] {
+	if q.bq != nil {
+			q.bq = q.bq.Limit(n)
+	}
+	return q
+}
+
+func (q *TypedQuery[T]) Gather(dst *[]T) *TypedQuery[T] {
+	if q.bq != nil {
+			q.bq = q.bq.Gather(dst)
+	}
+	return q
+}
+
+func (q *TypedQuery[T]) GatherIDs(ids any) *TypedQuery[T] {
+	if q.bq != nil {
+			q.bq = q.bq.GatherIDs(ids)
+	}
+	return q
+}
+
+func (q *TypedQuery[T]) List() ([]T, error) {
+	if q.bq != nil {
+			return q.bq.List()
+	}
+	panic("TypedQuery: no backend set")
+}
+
+func (q *TypedQuery[T]) Get() (T, error) {
+	if q.bq != nil {
+			return q.bq.Get()
+	}
+	panic("TypedQuery: no backend set")
+}
+
+func (q *TypedQuery[T]) Count() (int, error) {
+	if q.bq != nil {
+			return q.bq.Count()
+	}
+	panic("TypedQuery: no backend set")
+}
+
+func (q *TypedQuery[T]) Exists() (bool, error) {
+	if q.bq != nil {
+			return q.bq.Exists()
+	}
+	panic("TypedQuery: no backend set")
+}
+
+func (q *TypedQuery[T]) ForEach(fn func(T) error) error {
+	if q.bq != nil {
+			return q.bq.ForEach(fn)
+	}
+	panic("TypedQuery: no backend set")
+}
+
+func (q *TypedQuery[T]) Delete() (int, error) {
+	if q.bq != nil {
+			return q.bq.Delete()
+	}
+	panic("TypedQuery: no backend set")
+}
+
+func (q *TypedQuery[T]) UpdateFields(fields map[string]any) (int, error) {
+	if q.bq != nil {
+			return q.bq.UpdateFields(fields)
+	}
+	panic("TypedQuery: no backend set")
+}
+
+func (q *TypedQuery[T]) UpdateField(field string, value any) (int, error) {
+	if q.bq != nil {
+			return q.bq.UpdateField(field, value)
+	}
+	panic("TypedQuery: no backend set")
+}
+
+func (q *TypedQuery[T]) UpdateNonzero(v T) (int, error) {
+	if q.bq != nil {
+			return q.bq.UpdateNonzero(v)
+	}
+	panic("TypedQuery: no backend set")
+}
+
+func (q *TypedQuery[T]) IDs(idsptr any) error {
+	if q.bq != nil {
+			return q.bq.IDs(idsptr)
+	}
+	panic("TypedQuery: no backend set")
+}
+
+func (q *TypedQuery[T]) Err() error {
+	if q.bq != nil {
+			return q.bq.Err()
+	}
+	return nil
 }
