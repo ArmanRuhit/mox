@@ -8,9 +8,6 @@ import (
 	"log/slog"
 	"runtime/debug"
 	"time"
-
-	"github.com/mjl-/bstore"
-
 	"github.com/mjl-/mox/metrics"
 	"github.com/mjl-/mox/mlog"
 	"github.com/mjl-/mox/moxio"
@@ -200,7 +197,7 @@ func loginAttemptWrite(l ...LoginAttempt) {
 		l[i].Key = l[i].calculateKey()
 	}
 
-	err := AuthDB.Write(context.Background(), func(tx *bstore.Tx) error {
+	err := AuthDB.Write(context.Background(), func(tx Tx) error {
 		for i := range l {
 			err := loginAttemptWriteTx(tx, &l[i])
 			l[i].log.Check(err, "adding login attempt")
@@ -210,10 +207,10 @@ func loginAttemptWrite(l ...LoginAttempt) {
 	l[0].log.Check(err, "storing login attempt")
 }
 
-func loginAttemptWriteTx(tx *bstore.Tx, a *LoginAttempt) error {
+func loginAttemptWriteTx(tx Tx, a *LoginAttempt) error {
 	xa := LoginAttempt{Key: a.Key}
 	var insert bool
-	if err := tx.Get(&xa); err == bstore.ErrAbsent {
+	if err := tx.Get(&xa); err == ErrAbsent {
 		a.First = time.Time{}
 		a.Count = 1
 		insert = true
@@ -240,7 +237,7 @@ func loginAttemptWriteTx(tx *bstore.Tx, a *LoginAttempt) error {
 	// Update state with its RecordsFailed.
 	origstate := LoginAttemptState{AccountName: a.AccountName}
 	var newstate bool
-	if err := tx.Get(&origstate); err == bstore.ErrAbsent {
+	if err := tx.Get(&origstate); err == ErrAbsent {
 		newstate = true
 	} else if err != nil {
 		return fmt.Errorf("get login attempt state: %v", err)
@@ -251,7 +248,7 @@ func loginAttemptWriteTx(tx *bstore.Tx, a *LoginAttempt) error {
 	}
 
 	if state.RecordsFailed > loginAttemptsMaxPerAccount {
-		q := bstore.QueryTx[LoginAttempt](tx)
+		q := Query[LoginAttempt](tx)
 		q.FilterNonzero(LoginAttempt{AccountName: a.AccountName})
 		q.FilterNotEqual("Result", AuthSuccess)
 		q.SortAsc("Last")
@@ -281,9 +278,9 @@ func loginAttemptWriteTx(tx *bstore.Tx, a *LoginAttempt) error {
 // LoginAttemptCleanup removes any LoginAttempt entries older than 30 days, for
 // all accounts.
 func LoginAttemptCleanup(ctx context.Context) error {
-	return AuthDB.Write(ctx, func(tx *bstore.Tx) error {
+	return AuthDB.Write(ctx, func(tx Tx) error {
 		var removed []LoginAttempt
-		q := bstore.QueryTx[LoginAttempt](tx)
+		q := Query[LoginAttempt](tx)
 		q.FilterLess("Last", time.Now().Add(-30*24*time.Hour))
 		q.Gather(&removed)
 		_, err := q.Delete()
@@ -315,8 +312,8 @@ func LoginAttemptCleanup(ctx context.Context) error {
 
 // loginAttemptRemoveAccount removes all LoginAttempt records for an account
 // (value must be non-empty).
-func loginAttemptRemoveAccount(tx *bstore.Tx, accountName string) error {
-	q := bstore.QueryTx[LoginAttempt](tx)
+func loginAttemptRemoveAccount(tx Tx, accountName string) error {
+	q := Query[LoginAttempt](tx)
 	q.FilterNonzero(LoginAttempt{AccountName: accountName})
 	_, err := q.Delete()
 	return err
@@ -328,8 +325,8 @@ func loginAttemptRemoveAccount(tx *bstore.Tx, accountName string) error {
 // If limit is greater than 0, at most limit records, most recent first, are returned.
 func LoginAttemptList(ctx context.Context, accountName string, limit int) ([]LoginAttempt, error) {
 	var l []LoginAttempt
-	err := AuthDB.Read(ctx, func(tx *bstore.Tx) error {
-		q := bstore.QueryTx[LoginAttempt](tx)
+	err := AuthDB.Read(ctx, func(tx Tx) error {
+		q := Query[LoginAttempt](tx)
 		if accountName != "" {
 			q.FilterNonzero(LoginAttempt{AccountName: accountName})
 		}

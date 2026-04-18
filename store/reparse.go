@@ -6,9 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
-
-	"github.com/mjl-/bstore"
-
 	"github.com/mjl-/mox/message"
 	"github.com/mjl-/mox/metrics"
 	"github.com/mjl-/mox/mlog"
@@ -80,10 +77,10 @@ func (a *Account) ReparseMessages(ctx context.Context, log mlog.Log) (int, error
 	var lastID int64 // Each db transaction starts after lastID.
 	for {
 		var n int
-		err := a.DB.Write(ctx, func(tx *bstore.Tx) error {
+		err := a.DB.Write(ctx, func(tx Tx) error {
 			var busy int
 
-			q := bstore.QueryTx[Message](tx)
+			q := Query[Message](tx)
 			q.FilterEqual("Expunged", false)
 			q.FilterGreater("ID", lastID)
 			q.Limit(reparseMessageBatchSize)

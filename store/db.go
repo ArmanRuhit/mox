@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"iter"
+
 	"github.com/mjl-/bstore"
 )
 
@@ -34,6 +36,7 @@ type Tx interface {
 var (
 	ErrAbsent = bstore.ErrAbsent
 	ErrUnique = bstore.ErrUnique
+	StopForEach = bstore.StopForEach
 )
 
 // TypedQuery is a generic, backend-agnostic query builder.
@@ -230,4 +233,11 @@ func (q *TypedQuery[T]) Err() error {
 			return q.bq.Err()
 	}
 	return nil
+}
+
+func (q *TypedQuery[T]) All() iter.Seq2[T, error] {
+	if q.bq != nil {
+		return q.bq.All()
+	}
+	panic("TypedQuery: no backend set")
 }

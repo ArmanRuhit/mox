@@ -11,7 +11,6 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/mjl-/bstore"
 	"github.com/mjl-/sherpa"
 
 	"github.com/mjl-/mox/dns"
@@ -204,9 +203,9 @@ func TestAPI(t *testing.T) {
 
 	// MailboxSetSpecialUse
 	var inbox, archive, sent, drafts, testbox1 store.Mailbox
-	err = acc.DB.Read(ctx, func(tx *bstore.Tx) error {
+	err = acc.DB.Read(ctx, func(tx store.Tx) error {
 		get := func(k string, v any) store.Mailbox {
-			mb, err := bstore.QueryTx[store.Mailbox](tx).FilterEqual("Expunged", false).FilterEqual(k, v).Get()
+			mb, err := store.Query[store.Mailbox](tx).FilterEqual("Expunged", false).FilterEqual(k, v).Get()
 			tcheck(t, err, "get special-use mailbox")
 			return mb
 		}
@@ -267,7 +266,7 @@ func TestAPI(t *testing.T) {
 
 	// MailboxDelete
 	api.MailboxDelete(ctx, testbox1.ID)
-	testa, err := bstore.QueryDB[store.Mailbox](ctx, acc.DB).FilterEqual("Name", "Test/A").Get()
+	testa, err := store.QueryDB[store.Mailbox](ctx, acc.DB).FilterEqual("Name", "Test/A").Get()
 	tcheck(t, err, "get mailbox Test/A")
 	tneedError(t, func() { api.MailboxDelete(ctx, testa.ID) })       // Test/A/B still exists.
 	tneedError(t, func() { api.MailboxDelete(ctx, 0) })              // Bad ID.
@@ -276,7 +275,7 @@ func TestAPI(t *testing.T) {
 	tneedError(t, func() { api.ParsedMessage(ctx, testbox1Alt.ID) }) // Message was removed and no longer exists.
 
 	api.MailboxCreate(ctx, "Testbox1")
-	testbox1, err = bstore.QueryDB[store.Mailbox](ctx, acc.DB).FilterEqual("Expunged", false).FilterEqual("Name", "Testbox1").Get()
+	testbox1, err = store.QueryDB[store.Mailbox](ctx, acc.DB).FilterEqual("Expunged", false).FilterEqual("Name", "Testbox1").Get()
 	tcheck(t, err, "get testbox1")
 	tdeliver(t, acc, testbox1Alt)
 
@@ -558,9 +557,9 @@ func TestAPI(t *testing.T) {
 
 		var n int
 		if expListID != "" {
-			n, err = bstore.QueryDB[store.RulesetNoListID](ctx, acc.DB).Delete()
+			n, err = store.QueryDB[store.RulesetNoListID](ctx, acc.DB).Delete()
 		} else {
-			n, err = bstore.QueryDB[store.RulesetNoMsgFrom](ctx, acc.DB).Delete()
+			n, err = store.QueryDB[store.RulesetNoMsgFrom](ctx, acc.DB).Delete()
 		}
 		tcheck(t, err, "remove never-answer for listid/msgfrom")
 		tcompare(t, n, 1)
@@ -572,7 +571,7 @@ func TestAPI(t *testing.T) {
 		_, _, _, _, ruleset = api.RulesetSuggestMove(ctx, msgID, inbox.ID, testbox1.ID)
 		tcompare(t, ruleset == nil, true)
 
-		n, err = bstore.QueryDB[store.RulesetNoMailbox](ctx, acc.DB).Delete()
+		n, err = store.QueryDB[store.RulesetNoMailbox](ctx, acc.DB).Delete()
 		tcheck(t, err, "remove never-answer for mailbox")
 		tcompare(t, n, 1)
 

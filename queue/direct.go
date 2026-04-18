@@ -17,8 +17,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	"github.com/mjl-/adns"
-	"github.com/mjl-/bstore"
-
 	"github.com/mjl-/mox/config"
 	"github.com/mjl-/mox/dns"
 	"github.com/mjl-/mox/dsn"
@@ -308,7 +306,7 @@ func deliverDirect(qlog mlog.Log, resolver dns.Resolver, dialer smtpclient.Diale
 			delMsgs[i] = *mr.msg
 		}
 		if len(delMsgs) > 0 {
-			err := DB.Write(context.Background(), func(tx *bstore.Tx) error {
+			err := DB.Write(context.Background(), func(tx store.Tx) error {
 				return retireMsgs(nqlog, tx, webhook.EventDelivered, 0, "", nil, delMsgs...)
 			})
 			if err != nil {
@@ -319,7 +317,7 @@ func deliverDirect(qlog mlog.Log, resolver dns.Resolver, dialer smtpclient.Diale
 			kick()
 		}
 		if len(result.failed) > 0 {
-			err := DB.Write(context.Background(), func(tx *bstore.Tx) error {
+			err := DB.Write(context.Background(), func(tx store.Tx) error {
 				for _, mr := range result.failed {
 					failMsgsTx(nqlog, tx, []*Msg{mr.msg}, m0.DialedIPs, backoff, remoteMTA, smtpclient.Error(mr.resp))
 				}
@@ -781,9 +779,9 @@ func updateRecipientDomainTLS(ctx context.Context, log mlog.Log, senderAccount s
 		err := acc.Close()
 		log.Check(err, "closing account")
 	}()
-	err = acc.DB.Write(ctx, func(tx *bstore.Tx) error {
+	err = acc.DB.Write(ctx, func(tx store.Tx) error {
 		// First delete any existing record.
-		if err := tx.Delete(&store.RecipientDomainTLS{Domain: rdt.Domain}); err != nil && err != bstore.ErrAbsent {
+		if err := tx.Delete(&store.RecipientDomainTLS{Domain: rdt.Domain}); err != nil && err != store.ErrAbsent {
 			return fmt.Errorf("removing previous recipient domain tls status: %w", err)
 		}
 		// Insert new record.

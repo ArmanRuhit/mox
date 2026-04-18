@@ -5,8 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mjl-/bstore"
-
 	"github.com/mjl-/mox/imapclient"
 	"github.com/mjl-/mox/store"
 )
@@ -256,13 +254,13 @@ func testFetch(t *testing.T, uidonly bool) {
 	tc.transactf("ok", "uid fetch 1 savedate")
 	// Fetch exact SaveDate we'll be expecting from server.
 	var saveDate time.Time
-	err = tc.account.DB.Read(ctxbg, func(tx *bstore.Tx) error {
+	err = tc.account.DB.Read(ctxbg, func(tx store.Tx) error {
 		inbox, err := tc.account.MailboxFind(tx, "Inbox")
 		tc.check(err, "get inbox")
 		if inbox == nil {
 			t.Fatalf("missing inbox")
 		}
-		m, err := bstore.QueryTx[store.Message](tx).FilterNonzero(store.Message{MailboxID: inbox.ID, UID: store.UID(uid1)}).Get()
+		m, err := store.Query[store.Message](tx).FilterNonzero(store.Message{MailboxID: inbox.ID, UID: store.UID(uid1)}).Get()
 		tc.check(err, "get message")
 		if m.SaveDate == nil {
 			t.Fatalf("zero savedate for message")
@@ -502,7 +500,7 @@ Content-Location: http://localhost
 	tc.xuntagged(tc.untaggedFetch(1, 1, imapclient.FetchPreview{Preview: &preview}))
 
 	// On-demand preview and saving on first request.
-	err = tc.account.DB.Write(ctxbg, func(tx *bstore.Tx) error {
+	err = tc.account.DB.Write(ctxbg, func(tx store.Tx) error {
 		m := store.Message{ID: 1}
 		err := tx.Get(&m)
 		tcheck(t, err, "get message")

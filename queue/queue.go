@@ -80,7 +80,7 @@ var (
 var jitter = mox.NewPseudoRand()
 
 var DBTypes = []any{Msg{}, HoldRule{}, MsgRetired{}, webapi.Suppression{}, Hook{}, HookRetired{}} // Types stored in DB.
-var DB *bstore.DB                                                                                 // Exported for making backups.
+var DB store.DB // Exported for making backups.
 
 // Allow requesting delivery starting from up to this interval from time of submission.
 const FutureReleaseIntervalMax = 60 * 24 * time.Hour
@@ -353,9 +353,10 @@ func Init() error {
 	var err error
 	log := mlog.New("queue", nil)
 	opts := bstore.Options{Timeout: 5 * time.Second, Perm: 0660, RegisterLogger: moxvar.RegisterLogger(qpath, log.Logger)}
-	DB, err = bstore.Open(mox.Shutdown, qpath, &opts, DBTypes...)
+	rawDB, err := bstore.Open(mox.Shutdown, qpath, &opts, DBTypes...)
 	if err == nil {
-		err = DB.Read(mox.Shutdown, func(tx *bstore.Tx) error {
+		DB = store.NewBstoreDB(rawDB)
+		err = DB.Read(mox.Shutdown, func(tx store.Tx) error {
 			return metricHoldUpdate(tx)
 		})
 	}
@@ -371,8 +372,8 @@ func Init() error {
 
 // When we update the gauge, we just get the full current value, not try to account
 // for adds/removes.
-func metricHoldUpdate(tx *bstore.Tx) error {
-	count, err := bstore.QueryTx[Msg](tx).FilterNonzero(Msg{Hold: true}).Count()
+func metricHoldUpdate(tx store.Tx) error {
+	count, err := store.Query[Msg](tx).FilterNonzero(Msg{Hold: true}).Count()
 	if err != nil {
 		return fmt.Errorf("querying messages on hold for metric: %v", err)
 	}
@@ -408,7 +409,7 @@ type Filter struct {
 	Transport   *string
 }
 
-func (f Filter) apply(q *bstore.Query[Msg]) error {
+func (f Filter) apply(q *store.TypedQuery[Msg]) error {
 	if len(f.IDs) > 0 {
 		q.FilterIDs(f.IDs)
 	}
@@ -473,7 +474,7 @@ type Sort struct {
 	Asc    bool   // Ascending, or descending.
 }
 
-func (s Sort) apply(q *bstore.Query[Msg]) error {
+func (s Sort) apply(q *store.TypedQuery[Msg]) error {
 	switch s.Field {
 	case "", "NextAttempt":
 		s.Field = "NextAttempt"
@@ -525,7 +526,7 @@ func (s Sort) apply(q *bstore.Query[Msg]) error {
 // List returns max 100 messages matching filter in the delivery queue.
 // By default, orders by next delivery attempt.
 func List(ctx context.Context, filter Filter, sort Sort) ([]Msg, error) {
-	q := bstore.QueryDB[Msg](ctx, DB)
+	q := store.QueryDB[Msg](ctx, DB)
 	if err := filter.apply(q); err != nil {
 		return nil, err
 	}
@@ -541,19 +542,19 @@ func List(ctx context.Context, filter Filter, sort Sort) ([]Msg, error) {
 
 // Count returns the number of messages in the delivery queue.
 func Count(ctx context.Context) (int, error) {
-	return bstore.QueryDB[Msg](ctx, DB).Count()
+	return store.QueryDB[Msg](ctx, DB).Count()
 }
 
 // HoldRuleList returns all hold rules.
 func HoldRuleList(ctx context.Context) ([]HoldRule, error) {
-	return bstore.QueryDB[HoldRule](ctx, DB).List()
+	return store.QueryDB[HoldRule](ctx, DB).List()
 }
 
 // HoldRuleAdd adds a new hold rule causing newly submitted messages to be marked
 // as "on hold", and existing matching messages too.
 func HoldRuleAdd(ctx context.Context, log mlog.Log, hr HoldRule) (HoldRule, error) {
 	var n int
-	err := DB.Write(ctx, func(tx *bstore.Tx) error {
+	err := DB.Write(ctx, func(tx store.Tx) error {
 		hr.ID = 0
 		hr.SenderDomainStr = hr.SenderDomain.Name()
 		hr.RecipientDomainStr = hr.RecipientDomain.Name()
@@ -562,7 +563,7 @@ func HoldRuleAdd(ctx context.Context, log mlog.Log, hr HoldRule) (HoldRule, erro
 		}
 		log.Info("adding hold rule", slog.Any("holdrule", hr))
 
-		q := bstore.QueryTx[Msg](tx)
+		q := store.Query[Msg](tx)
 		if !hr.All() {
 			q.FilterNonzero(Msg{
 				SenderAccount:      hr.Account,
@@ -588,7 +589,7 @@ func HoldRuleAdd(ctx context.Context, log mlog.Log, hr HoldRule) (HoldRule, erro
 // HoldRuleRemove removes a hold rule. The Hold field of existing messages are not
 // changed.
 func HoldRuleRemove(ctx context.Context, log mlog.Log, holdRuleID int64) error {
-	return DB.Write(ctx, func(tx *bstore.Tx) error {
+	return DB.Write(ctx, func(tx store.Tx) error {
 		hr := HoldRule{ID: holdRuleID}
 		if err := tx.Get(&hr); err != nil {
 			return err
@@ -660,7 +661,7 @@ func Add(ctx context.Context, log mlog.Log, senderAccount string, msgFile *os.Fi
 	}()
 
 	// Mark messages Hold if they match a hold rule.
-	holdRules, err := bstore.QueryTx[HoldRule](tx).List()
+	holdRules, err := store.Query[HoldRule](tx).List()
 	if err != nil {
 		return fmt.Errorf("getting queue hold rules")
 	}
@@ -674,12 +675,12 @@ func Add(ctx context.Context, log mlog.Log, senderAccount string, msgFile *os.Fi
 		// can be the empty string. We check in both Msg and MsgRetired, both are relevant
 		// for uniquely identifying a message sent in the past.
 		if fromID := qml[i].FromID; fromID != "" {
-			if exists, err := bstore.QueryTx[Msg](tx).FilterNonzero(Msg{FromID: fromID}).Exists(); err != nil {
+			if exists, err := store.Query[Msg](tx).FilterNonzero(Msg{FromID: fromID}).Exists(); err != nil {
 				return fmt.Errorf("looking up fromid: %v", err)
 			} else if exists {
 				return fmt.Errorf("%w: fromid %q already present in message queue", ErrFromID, fromID)
 			}
-			if exists, err := bstore.QueryTx[MsgRetired](tx).FilterNonzero(MsgRetired{FromID: fromID}).Exists(); err != nil {
+			if exists, err := store.Query[MsgRetired](tx).FilterNonzero(MsgRetired{FromID: fromID}).Exists(); err != nil {
 				return fmt.Errorf("looking up fromid: %v", err)
 			} else if exists {
 				return fmt.Errorf("%w: fromid %q already present in retired message queue", ErrFromID, fromID)
@@ -784,8 +785,8 @@ func msgqueueKick() {
 // NextAttemptAdd adds a duration to the NextAttempt for all matching messages, and
 // kicks the queue.
 func NextAttemptAdd(ctx context.Context, filter Filter, d time.Duration) (affected int, err error) {
-	err = DB.Write(ctx, func(tx *bstore.Tx) error {
-		q := bstore.QueryTx[Msg](tx)
+	err = DB.Write(ctx, func(tx store.Tx) error {
+		q := store.Query[Msg](tx)
 		if err := filter.apply(q); err != nil {
 			return err
 		}
@@ -812,7 +813,7 @@ func NextAttemptAdd(ctx context.Context, filter Filter, d time.Duration) (affect
 // NextAttemptSet sets NextAttempt for all matching messages to a new time, and
 // kicks the queue.
 func NextAttemptSet(ctx context.Context, filter Filter, t time.Time) (affected int, err error) {
-	q := bstore.QueryDB[Msg](ctx, DB)
+	q := store.QueryDB[Msg](ctx, DB)
 	if err := filter.apply(q); err != nil {
 		return 0, err
 	}
@@ -826,8 +827,8 @@ func NextAttemptSet(ctx context.Context, filter Filter, t time.Time) (affected i
 
 // HoldSet sets Hold for all matching messages and kicks the queue.
 func HoldSet(ctx context.Context, filter Filter, hold bool) (affected int, err error) {
-	err = DB.Write(ctx, func(tx *bstore.Tx) error {
-		q := bstore.QueryTx[Msg](tx)
+	err = DB.Write(ctx, func(tx store.Tx) error {
+		q := store.Query[Msg](tx)
 		if err := filter.apply(q); err != nil {
 			return err
 		}
@@ -847,7 +848,7 @@ func HoldSet(ctx context.Context, filter Filter, hold bool) (affected int, err e
 
 // TransportSet changes the transport to use for the matching messages.
 func TransportSet(ctx context.Context, filter Filter, transport string) (affected int, err error) {
-	q := bstore.QueryDB[Msg](ctx, DB)
+	q := store.QueryDB[Msg](ctx, DB)
 	if err := filter.apply(q); err != nil {
 		return 0, err
 	}
@@ -879,8 +880,8 @@ func Drop(ctx context.Context, log mlog.Log, f Filter) (affected int, err error)
 
 func failDrop(ctx context.Context, log mlog.Log, filter Filter, fail bool) (affected int, err error) {
 	var msgs []Msg
-	err = DB.Write(ctx, func(tx *bstore.Tx) error {
-		q := bstore.QueryTx[Msg](tx)
+	err = DB.Write(ctx, func(tx store.Tx) error {
+		q := store.Query[Msg](tx)
 		if err := filter.apply(q); err != nil {
 			return err
 		}
@@ -932,7 +933,7 @@ func failDrop(ctx context.Context, log mlog.Log, filter Filter, fail bool) (affe
 
 // RequireTLSSet updates the RequireTLS field of matching messages.
 func RequireTLSSet(ctx context.Context, filter Filter, requireTLS *bool) (affected int, err error) {
-	q := bstore.QueryDB[Msg](ctx, DB)
+	q := store.QueryDB[Msg](ctx, DB)
 	if err := filter.apply(q); err != nil {
 		return 0, err
 	}
@@ -958,7 +959,7 @@ type RetiredFilter struct {
 	Success      *bool
 }
 
-func (f RetiredFilter) apply(q *bstore.Query[MsgRetired]) error {
+func (f RetiredFilter) apply(q *store.TypedQuery[MsgRetired]) error {
 	if len(f.IDs) > 0 {
 		q.FilterIDs(f.IDs)
 	}
@@ -1023,7 +1024,7 @@ type RetiredSort struct {
 	Asc    bool   // Ascending, or descending.
 }
 
-func (s RetiredSort) apply(q *bstore.Query[MsgRetired]) error {
+func (s RetiredSort) apply(q *store.TypedQuery[MsgRetired]) error {
 	switch s.Field {
 	case "", "LastActivity":
 		s.Field = "LastActivity"
@@ -1074,7 +1075,7 @@ func (s RetiredSort) apply(q *bstore.Query[MsgRetired]) error {
 
 // RetiredList returns retired messages.
 func RetiredList(ctx context.Context, filter RetiredFilter, sort RetiredSort) ([]MsgRetired, error) {
-	q := bstore.QueryDB[MsgRetired](ctx, DB)
+	q := store.QueryDB[MsgRetired](ctx, DB)
 	if err := filter.apply(q); err != nil {
 		return nil, err
 	}
@@ -1150,7 +1151,7 @@ func cleanupMsgRetired(done chan struct{}) {
 }
 
 func cleanupMsgRetiredSingle(log mlog.Log) {
-	n, err := bstore.QueryDB[MsgRetired](mox.Shutdown, DB).FilterLess("KeepUntil", time.Now()).Delete()
+	n, err := store.QueryDB[MsgRetired](mox.Shutdown, DB).FilterLess("KeepUntil", time.Now()).Delete()
 	log.Check(err, "removing old retired messages")
 	if n > 0 {
 		log.Debug("cleaned up retired messages", slog.Int("count", n))
@@ -1191,7 +1192,7 @@ func startQueue(resolver dns.Resolver, done chan struct{}) {
 }
 
 func nextWork(ctx context.Context, log mlog.Log, busyDomains map[string]struct{}) time.Duration {
-	q := bstore.QueryDB[Msg](ctx, DB)
+	q := store.QueryDB[Msg](ctx, DB)
 	if len(busyDomains) > 0 {
 		var doms []any
 		for d := range busyDomains {
@@ -1203,7 +1204,7 @@ func nextWork(ctx context.Context, log mlog.Log, busyDomains map[string]struct{}
 	q.SortAsc("NextAttempt")
 	q.Limit(1)
 	qm, err := q.Get()
-	if err == bstore.ErrAbsent {
+	if err == store.ErrAbsent {
 		return 24 * time.Hour
 	} else if err != nil {
 		log.Errorx("finding time for next delivery attempt", err)
@@ -1213,7 +1214,7 @@ func nextWork(ctx context.Context, log mlog.Log, busyDomains map[string]struct{}
 }
 
 func launchWork(log mlog.Log, resolver dns.Resolver, busyDomains map[string]struct{}) int {
-	q := bstore.QueryDB[Msg](mox.Shutdown, DB)
+	q := store.QueryDB[Msg](mox.Shutdown, DB)
 	q.FilterLessEqual("NextAttempt", time.Now())
 	q.FilterEqual("Hold", false)
 	q.SortAsc("NextAttempt")
@@ -1271,7 +1272,7 @@ func removeMsgsFS(log mlog.Log, msgs ...Msg) error {
 //
 // Callers must remove the messages from the file system afterwards, see
 // removeMsgsFS. Callers must also kick the message and webhook queues.
-func retireMsgs(log mlog.Log, tx *bstore.Tx, event webhook.OutgoingEvent, code int, secode string, suppressedMsgIDs []int64, msgs ...Msg) error {
+func retireMsgs(log mlog.Log, tx store.Tx, event webhook.OutgoingEvent, code int, secode string, suppressedMsgIDs []int64, msgs ...Msg) error {
 	now := time.Now()
 
 	var hooks []Hook
@@ -1417,7 +1418,7 @@ func deliver(log mlog.Log, resolver dns.Resolver, m0 Msg) {
 	// Check if recipient is on suppression list. If so, fail delivery.
 	path := smtp.Path{Localpart: m0.RecipientLocalpart, IPDomain: m0.RecipientDomain}
 	baseAddr := baseAddress(path).XString(true)
-	qsup := bstore.QueryTx[webapi.Suppression](xtx)
+	qsup := store.Query[webapi.Suppression](xtx)
 	qsup.FilterNonzero(webapi.Suppression{Account: m0.SenderAccount, BaseAddress: baseAddr})
 	exists, err := qsup.Exists()
 	if err != nil || exists {
@@ -1471,7 +1472,7 @@ func deliver(log mlog.Log, resolver dns.Resolver, m0 Msg) {
 	msgs := []*Msg{&m0}
 	if m0.BaseID != 0 {
 		gather := func() error {
-			q := bstore.QueryTx[Msg](xtx)
+			q := store.Query[Msg](xtx)
 			q.FilterNonzero(Msg{BaseID: m0.BaseID, RecipientDomainStr: m0.RecipientDomainStr, Attempts: m0.Attempts - 1})
 			q.FilterNotEqual("ID", m0.ID)
 			q.FilterLessEqual("NextAttempt", origNextAttempt)

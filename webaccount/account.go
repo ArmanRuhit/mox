@@ -24,7 +24,6 @@ import (
 
 	_ "embed"
 
-	"github.com/mjl-/bstore"
 	"github.com/mjl-/sherpa"
 	"github.com/mjl-/sherpadoc"
 	"github.com/mjl-/sherpaprom"
@@ -463,7 +462,7 @@ func (Account) Account(ctx context.Context) (account config.Account, storageUsed
 		accConf, _ = acc.Conf()
 
 		storageLimit = acc.QuotaMessageSize()
-		err := acc.DB.Read(ctx, func(tx *bstore.Tx) error {
+		err := acc.DB.Read(ctx, func(tx store.Tx) error {
 			du := store.DiskUsage{ID: 1}
 			err := tx.Get(&du)
 			storageUsed = du.MessageSize
@@ -549,7 +548,7 @@ func (Account) SuppressionAdd(ctx context.Context, address string, manual bool, 
 		Reason:  reason,
 	}
 	err = queue.SuppressionAdd(ctx, addr.Path(), &sup)
-	if err != nil && errors.Is(err, bstore.ErrUnique) {
+	if err != nil && errors.Is(err, store.ErrUnique) {
 		xcheckuserf(ctx, err, "add suppression")
 	}
 	xcheckf(ctx, err, "add suppression")
@@ -562,7 +561,7 @@ func (Account) SuppressionRemove(ctx context.Context, address string) {
 	addr, err := smtp.ParseAddress(address)
 	xcheckuserf(ctx, err, "parsing address")
 	err = queue.SuppressionRemove(ctx, reqInfo.AccountName, addr.Path())
-	if err != nil && err == bstore.ErrAbsent {
+	if err != nil && err == store.ErrAbsent {
 		xcheckuserf(ctx, err, "remove suppression")
 	}
 	xcheckf(ctx, err, "remove suppression")
@@ -746,7 +745,7 @@ func (Account) TLSPublicKeyAdd(ctx context.Context, loginAddress, name string, n
 	tpk.LoginAddress = loginAddress
 	tpk.NoIMAPPreauth = noIMAPPreauth
 	err = store.TLSPublicKeyAdd(ctx, &tpk)
-	if err != nil && errors.Is(err, bstore.ErrUnique) {
+	if err != nil && errors.Is(err, store.ErrUnique) {
 		xcheckuserf(ctx, err, "add tls public key")
 	} else {
 		xcheckf(ctx, err, "add tls public key")
@@ -757,9 +756,9 @@ func (Account) TLSPublicKeyAdd(ctx context.Context, loginAddress, name string, n
 func xtlspublickey(ctx context.Context, account string, fingerprint string) store.TLSPublicKey {
 	tpk, err := store.TLSPublicKeyGet(ctx, fingerprint)
 	if err == nil && tpk.Account != account {
-		err = bstore.ErrAbsent
+		err = store.ErrAbsent
 	}
-	if err == bstore.ErrAbsent {
+	if err == store.ErrAbsent {
 		xcheckuserf(ctx, err, "get tls public key")
 	}
 	xcheckf(ctx, err, "get tls public key")

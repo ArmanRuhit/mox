@@ -314,6 +314,14 @@ func xbackupctl(ctx context.Context, xctl *ctl) {
 		xvlog("backed up database file", slog.String("path", path), slog.Duration("duration", time.Since(start)))
 		return true
 	}
+	// unwrapBstore extracts the underlying *bstore.DB from a store.DB interface (BstoreDB adapter).
+	unwrapBstore := func(db store.DB) *bstore.DB {
+		type rawBstoreGetter interface{ RawBstore() *bstore.DB }
+		if g, ok := db.(rawBstoreGetter); ok {
+			return g.RawBstore()
+		}
+		panic("backupDB: store.DB is not a BstoreDB wrapper")
+	}
 
 	// Try to create a hardlink. Fall back to copying the file (e.g. when on different file system).
 	warnedHardlink := false // We warn once about failing to hardlink.
@@ -377,7 +385,7 @@ func xbackupctl(ctx context.Context, xctl *ctl) {
 	if err := os.WriteFile(filepath.Join(dstDataDir, "moxversion"), []byte(moxvar.Version), 0660); err != nil {
 		xerrx("writing moxversion", err)
 	}
-	backupDB(store.AuthDB, "auth.db")
+	backupDB(unwrapBstore(store.AuthDB), "auth.db")
 	backupDB(dmarcdb.ReportsDB, "dmarcrpt.db")
 	backupDB(dmarcdb.EvalDB, "dmarceval.db")
 	backupDB(mtastsdb.DB, "mtasts.db")
@@ -397,7 +405,7 @@ func xbackupctl(ctx context.Context, xctl *ctl) {
 	backupQueue := func(path string) {
 		tmQueue := time.Now()
 
-		if !backupDB(queue.DB, path) {
+		if !backupDB(unwrapBstore(queue.DB), path) {
 			return
 		}
 
@@ -499,7 +507,7 @@ func xbackupctl(ctx context.Context, xctl *ctl) {
 
 		// Copy database file.
 		dbpath := filepath.Join("accounts", acc.Name, "index.db")
-		backupDB(acc.DB, dbpath)
+		backupDB(unwrapBstore(acc.DB), dbpath)
 
 		// todo: should document/check not taking a rlock on account.
 

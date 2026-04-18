@@ -5,8 +5,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/mjl-/bstore"
-
 	"github.com/mjl-/mox/store"
 )
 
@@ -30,7 +28,7 @@ type notify struct {
 
 // match checks if an event for a mailbox id/name (optional depending on type)
 // should be turned into a notification to the client.
-func (n notify) match(c *conn, xtxfn func() *bstore.Tx, mailboxID int64, mailbox string, kind eventKind) (mailboxSpecifier, notifyEvent, bool) {
+func (n notify) match(c *conn, xtxfn func() store.Tx, mailboxID int64, mailbox string, kind eventKind) (mailboxSpecifier, notifyEvent, bool) {
 	// We look through the event groups, and won't stop looking until we've found a
 	// confirmation the event should be notified. ../rfc/5465:756
 
@@ -101,7 +99,7 @@ func (n notify) match(c *conn, xtxfn func() *bstore.Tx, mailboxID int64, mailbox
 		case mbspecSubscribed: // ../rfc/5465:831
 			sub := store.Subscription{Name: mailbox}
 			err := xtxfn().Get(&sub)
-			if err != bstore.ErrAbsent {
+			if err != store.ErrAbsent {
 				xcheckf(err, "lookup subscription")
 			}
 			match = err == nil
@@ -280,9 +278,9 @@ func (c *conn) cmdNotify(tag, cmd string, p *parser) {
 			default:
 			}
 
-			c.xdbread(func(tx *bstore.Tx) {
+			c.xdbread(func(tx store.Tx) {
 				// Send STATUS responses for all matching mailboxes. ../rfc/5465:271
-				q := bstore.QueryTx[store.Mailbox](tx)
+				q := store.Query[store.Mailbox](tx)
 				q.FilterEqual("Expunged", false)
 				q.SortAsc("Name")
 				for mb, err := range q.All() {
@@ -291,7 +289,7 @@ func (c *conn) cmdNotify(tag, cmd string, p *parser) {
 					if mb.ID == c.mailboxID {
 						continue
 					}
-					_, _, ok := n.match(c, func() *bstore.Tx { return tx }, mb.ID, mb.Name, eventMessageNew)
+					_, _, ok := n.match(c, func() store.Tx { return tx }, mb.ID, mb.Name, eventMessageNew)
 					if !ok {
 						continue
 					}

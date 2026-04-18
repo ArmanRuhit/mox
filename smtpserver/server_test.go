@@ -24,8 +24,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mjl-/bstore"
-
 	"github.com/mjl-/mox/config"
 	"github.com/mjl-/mox/dkim"
 	"github.com/mjl-/mox/dmarcdb"
@@ -115,8 +113,8 @@ func newTestServer(t *testing.T, configPath string, resolver dns.Resolver) *test
 		tcheck(t, err, fmt.Sprintf(format, args...))
 	}
 	xops := webops.XOps{
-		DBWrite: func(ctx context.Context, acc *store.Account, fn func(tx *bstore.Tx)) {
-			err := acc.DB.Write(ctx, func(tx *bstore.Tx) error {
+		DBWrite: func(ctx context.Context, acc *store.Account, fn func(tx store.Tx)) {
+			err := acc.DB.Write(ctx, func(tx store.Tx) error {
 				fn(tx)
 				return nil
 			})
@@ -191,12 +189,12 @@ func (ts *testserver) close() {
 func (ts *testserver) checkCount(mailboxName string, expect int) {
 	t := ts.t
 	t.Helper()
-	q := bstore.QueryDB[store.Mailbox](ctxbg, ts.acc.DB)
+	q := store.QueryDB[store.Mailbox](ctxbg, ts.acc.DB)
 	q.FilterNonzero(store.Mailbox{Name: mailboxName})
 	q.FilterEqual("Expunged", false)
 	mb, err := q.Get()
 	tcheck(t, err, "get mailbox")
-	qm := bstore.QueryDB[store.Message](ctxbg, ts.acc.DB)
+	qm := store.QueryDB[store.Message](ctxbg, ts.acc.DB)
 	qm.FilterNonzero(store.Message{MailboxID: mb.ID})
 	qm.FilterEqual("Expunged", false)
 	n, err := qm.Count()
@@ -669,7 +667,7 @@ func tretrain(t *testing.T, acc *store.Account) {
 	defer jf.Close()
 
 	// Fetch messags to retrain on.
-	q := bstore.QueryDB[store.Message](ctxbg, acc.DB)
+	q := store.QueryDB[store.Message](ctxbg, acc.DB)
 	q.FilterEqual("Expunged", false)
 	q.FilterFn(func(m store.Message) bool {
 		return m.Flags.Junk != m.Flags.Notjunk
@@ -761,7 +759,7 @@ func TestSpam(t *testing.T) {
 
 	// Mark the messages as having good reputation.
 	var ids []int64
-	err := bstore.QueryDB[store.Message](ctxbg, ts.acc.DB).FilterEqual("Expunged", false).ForEach(func(m store.Message) error {
+	err := store.QueryDB[store.Message](ctxbg, ts.acc.DB).FilterEqual("Expunged", false).ForEach(func(m store.Message) error {
 		ids = append(ids, m.ID)
 		return nil
 	})
@@ -785,7 +783,7 @@ func TestSpam(t *testing.T) {
 
 	// Undo dmarc pass, mark messages as junk, and train the filter.
 	resolver.TXT = nil
-	q := bstore.QueryDB[store.Message](ctxbg, ts.acc.DB)
+	q := store.QueryDB[store.Message](ctxbg, ts.acc.DB)
 	q.FilterEqual("Expunged", false)
 	_, err = q.UpdateFields(map[string]any{"Junk": true, "Notjunk": false})
 	tcheck(t, err, "update junkiness")
@@ -875,7 +873,7 @@ happens to come from forwarding mail server.
 			}
 			totalEvaluations += 10
 
-			n, err := bstore.QueryDB[store.Message](ctxbg, ts.acc.DB).UpdateFields(map[string]any{"Junk": true, "MsgFromValidated": true})
+			n, err := store.QueryDB[store.Message](ctxbg, ts.acc.DB).UpdateFields(map[string]any{"Junk": true, "MsgFromValidated": true})
 			tcheck(t, err, "marking messages as junk")
 			tcompare(t, n, 10)
 			tretrain(t, ts.acc)
@@ -1393,7 +1391,7 @@ func TestRatelimitDelivery(t *testing.T) {
 	// Message was already delivered once. We'll do another one. But the 3rd will fail.
 	// We need the actual size with prepended headers, since that is used in the
 	// calculations.
-	msg, err := bstore.QueryDB[store.Message](ctxbg, ts.acc.DB).Get()
+	msg, err := store.QueryDB[store.Message](ctxbg, ts.acc.DB).Get()
 	if err != nil {
 		t.Fatalf("getting delivered message for its size: %v", err)
 	}
@@ -1537,7 +1535,7 @@ func TestCatchall(t *testing.T) {
 	testDeliver("mjl+test@mox.example", nil) // Domain localpart catchall separator.
 	testDeliver("MJL+TEST@mox.example", nil) // Again, and case insensitive.
 
-	n, err := bstore.QueryDB[store.Message](ctxbg, ts.acc.DB).Count()
+	n, err := store.QueryDB[store.Message](ctxbg, ts.acc.DB).Count()
 	tcheck(t, err, "checking delivered messages")
 	tcompare(t, n, 3)
 
@@ -1549,14 +1547,14 @@ func TestCatchall(t *testing.T) {
 		acc.Close()
 		acc.WaitClosed()
 	}()
-	n, err = bstore.QueryDB[store.Message](ctxbg, acc.DB).Count()
+	n, err = store.QueryDB[store.Message](ctxbg, acc.DB).Count()
 	tcheck(t, err, "checking delivered messages to catchall account")
 	tcompare(t, n, 1)
 
 	testDeliver("mjl-test@mox2.example", nil)      // Second catchall separator.
 	testDeliver("mjl-test+test@mox2.example", nil) // Silly, both separators in address.
 	testDeliver("mjl+test-test@mox2.example", nil)
-	n, err = bstore.QueryDB[store.Message](ctxbg, ts.acc.DB).Count()
+	n, err = store.QueryDB[store.Message](ctxbg, ts.acc.DB).Count()
 	tcheck(t, err, "checking delivered messages")
 	tcompare(t, n, 6)
 }

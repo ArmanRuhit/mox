@@ -14,8 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mjl-/bstore"
-
 	"github.com/mjl-/mox/mlog"
 	"github.com/mjl-/mox/mox-"
 )
@@ -131,7 +129,7 @@ func (a *MboxArchiver) Close() error {
 // Some errors are not fatal and result in skipped messages. In that happens, a
 // file "errors.txt" is added to the archive describing the errors. The goal is to
 // let users export (hopefully) most messages even in the face of errors.
-func ExportMessages(ctx context.Context, log mlog.Log, db *bstore.DB, accountDir string, archiver Archiver, maildir bool, mailboxOpt string, messageIDsOpt []int64, recursive bool) error {
+func ExportMessages(ctx context.Context, log mlog.Log, db DB, accountDir string, archiver Archiver, maildir bool, mailboxOpt string, messageIDsOpt []int64, recursive bool) error {
 	// todo optimize: should prepare next file to add to archive (can be an mbox with many messages) while writing a file to the archive (which typically compresses, which takes time).
 
 	if mailboxOpt != "" && len(messageIDsOpt) != 0 {
@@ -173,7 +171,7 @@ func ExportMessages(ctx context.Context, log mlog.Log, db *bstore.DB, accountDir
 			// If exporting a specific mailbox, trim its parent path from stored file names.
 			trimPrefix = mox.ParentMailboxName(mailboxOpt) + "/"
 		}
-		q := bstore.QueryTx[Mailbox](tx)
+		q := Query[Mailbox](tx)
 		q.FilterEqual("Expunged", false)
 		q.FilterFn(func(mb Mailbox) bool {
 			return mailboxOpt == "" || mb.Name == mailboxOpt || recursive && strings.HasPrefix(mb.Name, prefix)
@@ -215,7 +213,7 @@ func ExportMessages(ctx context.Context, log mlog.Log, db *bstore.DB, accountDir
 	return nil
 }
 
-func exportMessages(log mlog.Log, tx *bstore.Tx, accountDir string, messageIDs []int64, archiver Archiver, maildir bool, start time.Time) (string, error) {
+func exportMessages(log mlog.Log, tx Tx, accountDir string, messageIDs []int64, archiver Archiver, maildir bool, start time.Time) (string, error) {
 	mbe, err := newMailboxExport(log, "Export", accountDir, archiver, start, maildir)
 	if err != nil {
 		return "", err
@@ -239,7 +237,7 @@ func exportMessages(log mlog.Log, tx *bstore.Tx, accountDir string, messageIDs [
 	return mbe.errors, err
 }
 
-func exportMailbox(log mlog.Log, tx *bstore.Tx, accountDir string, mailboxID int64, mailboxName string, archiver Archiver, maildir bool, start time.Time) (string, error) {
+func exportMailbox(log mlog.Log, tx Tx, accountDir string, mailboxID int64, mailboxName string, archiver Archiver, maildir bool, start time.Time) (string, error) {
 	mbe, err := newMailboxExport(log, mailboxName, accountDir, archiver, start, maildir)
 	if err != nil {
 		return "", err
@@ -247,7 +245,7 @@ func exportMailbox(log mlog.Log, tx *bstore.Tx, accountDir string, mailboxID int
 	defer mbe.Cleanup()
 
 	// Fetch all messages for mailbox.
-	q := bstore.QueryTx[Message](tx)
+	q := Query[Message](tx)
 	q.FilterNonzero(Message{MailboxID: mailboxID})
 	q.FilterEqual("Expunged", false)
 	q.SortAsc("Received", "ID")
