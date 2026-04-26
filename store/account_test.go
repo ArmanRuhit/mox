@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mjl-/bstore"
 	"github.com/mjl-/sconf"
 
 	"github.com/mjl-/mox/config"
@@ -87,9 +86,9 @@ func TestMailbox(t *testing.T) {
 		err := acc.DeliverDestination(log, conf.Destinations["mjl"], &m, msgFile)
 		tcheck(t, err, "deliver without consume")
 
-		err = acc.DB.Write(ctxbg, func(tx *bstore.Tx) error {
+		err = acc.DB.Write(ctxbg, func(tx Tx) error {
 			var err error
-			mbsent, err = bstore.QueryTx[Mailbox](tx).FilterNonzero(Mailbox{Name: "Sent"}).Get()
+			mbsent, err = Query[Mailbox](tx).FilterNonzero(Mailbox{Name: "Sent"}).Get()
 			tcheck(t, err, "sent mailbox")
 			msent.MailboxID = mbsent.ID
 			msent.MailboxOrigID = mbsent.ID
@@ -120,7 +119,7 @@ func TestMailbox(t *testing.T) {
 		err = acc.DeliverDestination(log, conf.Destinations["mjl"], &mconsumed, msgFile)
 		tcheck(t, err, "deliver with consume")
 
-		err = acc.DB.Write(ctxbg, func(tx *bstore.Tx) error {
+		err = acc.DB.Write(ctxbg, func(tx Tx) error {
 			m.Junk = true
 			l := []Message{m}
 			err = acc.RetrainMessages(ctxbg, log, tx, l)
@@ -135,7 +134,7 @@ func TestMailbox(t *testing.T) {
 	m.Notjunk = true
 	jf, _, err := acc.OpenJunkFilter(ctxbg, log)
 	tcheck(t, err, "open junk filter")
-	err = acc.DB.Write(ctxbg, func(tx *bstore.Tx) error {
+	err = acc.DB.Write(ctxbg, func(tx Tx) error {
 		return acc.RetrainMessage(ctxbg, log, tx, jf, &m)
 	})
 	tcheck(t, err, "retraining as non-junk")
@@ -143,7 +142,7 @@ func TestMailbox(t *testing.T) {
 	tcheck(t, err, "close junk filter")
 
 	m.Notjunk = false
-	err = acc.DB.Write(ctxbg, func(tx *bstore.Tx) error {
+	err = acc.DB.Write(ctxbg, func(tx Tx) error {
 		return acc.RetrainMessages(ctxbg, log, tx, []Message{m})
 	})
 	tcheck(t, err, "untraining non-junk")
@@ -168,18 +167,18 @@ func TestMailbox(t *testing.T) {
 	acc.WithWLock(func() {
 		var changes []Change
 
-		err := acc.DB.Write(ctxbg, func(tx *bstore.Tx) error {
+		err := acc.DB.Write(ctxbg, func(tx Tx) error {
 			_, _, err := acc.MailboxEnsure(tx, "Testbox", true, SpecialUse{}, &modseq)
 			return err
 		})
 		tcheck(t, err, "ensure mailbox exists")
-		err = acc.DB.Read(ctxbg, func(tx *bstore.Tx) error {
+		err = acc.DB.Read(ctxbg, func(tx Tx) error {
 			_, _, err := acc.MailboxEnsure(tx, "Testbox", true, SpecialUse{}, &modseq)
 			return err
 		})
 		tcheck(t, err, "ensure mailbox exists")
 
-		err = acc.DB.Write(ctxbg, func(tx *bstore.Tx) error {
+		err = acc.DB.Write(ctxbg, func(tx Tx) error {
 			_, _, err := acc.MailboxEnsure(tx, "Testbox2", false, SpecialUse{}, &modseq)
 			tcheck(t, err, "create mailbox")
 
@@ -219,7 +218,7 @@ func TestMailbox(t *testing.T) {
 			}
 
 			// todo: check that messages are removed.
-			mbRej, err := bstore.QueryTx[Mailbox](tx).FilterNonzero(Mailbox{Name: "Rejects"}).Get()
+			mbRej, err := Query[Mailbox](tx).FilterNonzero(Mailbox{Name: "Rejects"}).Get()
 			tcheck(t, err, "get rejects mailbox")
 			nchanges, hasSpace, err := acc.TidyRejectsMailbox(log, tx, &mbRej)
 			tcheck(t, err, "tidy rejects mailbox")
@@ -478,7 +477,7 @@ func TestRemove(t *testing.T) {
 	if _, err := os.Stat(p); err == nil || !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf(`got stat err %v for account directory, expected "does not exist"`, err)
 	}
-	exists, err := bstore.QueryDB[AccountRemove](ctxbg, AuthDB).Exists()
+	exists, err := QueryDB[AccountRemove](ctxbg, AuthDB).Exists()
 	tcheck(t, err, "checking for account removals")
 	tcompare(t, exists, false)
 }

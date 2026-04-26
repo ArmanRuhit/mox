@@ -63,17 +63,25 @@ func (b *BstoreDB) Read(ctx context.Context, fn func(tx Tx) error) error {
 func Query[T any](tx Tx) *TypedQuery[T] {
 	switch t := tx.(type) {
 	case *BstoreTx:
-			return &TypedQuery[T]{bq: bstore.QueryTx[T](t.tx)}
+		return &TypedQuery[T]{bq: bstore.QueryTx[T](t.tx)}
+	case *PgTx:
+		return &TypedQuery[T]{pg: newPgQuery[T](t.ctx, t.tx)}
 	default:
-			panic("Query: unknown Tx backend")
+		panic("Query: unknown Tx backend")
 	}
 }
 
 func QueryDB[T any](ctx context.Context, db DB) *TypedQuery[T] {
 	switch d := db.(type) {
 	case *BstoreDB:
-			return &TypedQuery[T]{bq: bstore.QueryDB[T](ctx, d.db)}
+		return &TypedQuery[T]{bq: bstore.QueryDB[T](ctx, d.db)}
+	case *PgDB:
+		// Uses the pool directly; the pool is configured (Step 11) with an
+		// AfterConnect hook that sets search_path so per-call schema setup
+		// isn't needed. For multi-statement work prefer wrapping in
+		// db.Read/Write so a single connection is held.
+		return &TypedQuery[T]{pg: newPgQuery[T](ctx, d.pool)}
 	default:
-			panic("QueryDB: unknown DB backend")
+		panic("QueryDB: unknown DB backend")
 	}
 }

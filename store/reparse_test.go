@@ -6,8 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mjl-/bstore"
-
 	"github.com/mjl-/mox/message"
 	"github.com/mjl-/mox/mlog"
 	"github.com/mjl-/mox/mox-"
