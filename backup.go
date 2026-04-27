@@ -314,13 +314,22 @@ func xbackupctl(ctx context.Context, xctl *ctl) {
 		xvlog("backed up database file", slog.String("path", path), slog.Duration("duration", time.Since(start)))
 		return true
 	}
-	// unwrapBstore extracts the underlying *bstore.DB from a store.DB interface (BstoreDB adapter).
-	unwrapBstore := func(db store.DB) *bstore.DB {
+	// unwrapBstore extracts the underlying *bstore.DB from a store.DB interface.
+	// Returns (nil, false) when the backend is PostgreSQL — callers skip the
+	// file-copy and let the operator use pg_dump for their own DB backup.
+	unwrapBstore := func(db store.DB) (*bstore.DB, bool) {
 		type rawBstoreGetter interface{ RawBstore() *bstore.DB }
 		if g, ok := db.(rawBstoreGetter); ok {
-			return g.RawBstore()
+			return g.RawBstore(), true
 		}
-		panic("backupDB: store.DB is not a BstoreDB wrapper")
+		return nil, false
+	}
+
+	// usingPG is true when the mox instance uses PostgreSQL instead of bstore.
+	// Callers skip DB file-copying and rely on external pg_dump for data backup.
+	usingPG := mox.Conf.Static.PostgreSQL != nil
+	if usingPG {
+		xvlog("PostgreSQL backend detected; database files are not copied — back up PostgreSQL data separately with pg_dump")
 	}
 
 	// Try to create a hardlink. Fall back to copying the file (e.g. when on different file system).
@@ -385,7 +394,9 @@ func xbackupctl(ctx context.Context, xctl *ctl) {
 	if err := os.WriteFile(filepath.Join(dstDataDir, "moxversion"), []byte(moxvar.Version), 0660); err != nil {
 		xerrx("writing moxversion", err)
 	}
-	backupDB(unwrapBstore(store.AuthDB), "auth.db")
+	if rawDB, ok := unwrapBstore(store.AuthDB); ok {
+		backupDB(rawDB, "auth.db")
+	}
 	backupDB(dmarcdb.ReportsDB, "dmarcrpt.db")
 	backupDB(dmarcdb.EvalDB, "dmarceval.db")
 	backupDB(mtastsdb.DB, "mtasts.db")
@@ -405,55 +416,64 @@ func xbackupctl(ctx context.Context, xctl *ctl) {
 	backupQueue := func(path string) {
 		tmQueue := time.Now()
 
-		if !backupDB(unwrapBstore(queue.DB), path) {
-			return
-		}
-
-		dstdbpath := filepath.Join(dstDataDir, path)
-		opts := bstore.Options{MustExist: true, RegisterLogger: xctl.log.Logger}
-		db, err := bstore.Open(ctx, dstdbpath, &opts, queue.DBTypes...)
-		if err != nil {
-			xerrx("open copied queue database", err, slog.String("dstpath", dstdbpath), slog.Duration("duration", time.Since(tmQueue)))
-			return
-		}
-
-		defer func() {
-			if db != nil {
-				err := db.Close()
-				xctl.log.Check(err, "closing new queue db")
+		rawDB, hasBstoreDB := unwrapBstore(queue.DB)
+		if hasBstoreDB {
+			if !backupDB(rawDB, path) {
+				return
 			}
-		}()
+		}
 
-		// Link/copy known message files. If a message has been removed while we read the
-		// database, our backup is not consistent and the backup will be marked failed.
+		// For bstore, enumerate message files from the copied DB for a consistent
+		// snapshot. For PG, the DB is not copied here; we walk the directory instead
+		// (PG data should be backed up via pg_dump separately).
 		tmMsgs := time.Now()
 		seen := map[string]struct{}{}
 		var nlinked, ncopied int
 		var maxID int64
-		err = bstore.QueryDB[queue.Msg](ctx, db).ForEach(func(m queue.Msg) error {
-			if m.ID > maxID {
-				maxID = m.ID
+
+		if hasBstoreDB {
+			dstdbpath := filepath.Join(dstDataDir, path)
+			opts := bstore.Options{MustExist: true, RegisterLogger: xctl.log.Logger}
+			db, err := bstore.Open(ctx, dstdbpath, &opts, queue.DBTypes...)
+			if err != nil {
+				xerrx("open copied queue database", err, slog.String("dstpath", dstdbpath), slog.Duration("duration", time.Since(tmQueue)))
+				return
 			}
-			mp := store.MessagePath(m.ID)
-			seen[mp] = struct{}{}
-			srcpath := filepath.Join(srcDataDir, "queue", mp)
-			dstpath := filepath.Join(dstDataDir, "queue", mp)
-			if linked, err := linkOrCopy(srcpath, dstpath); err != nil {
-				xerrx("linking/copying queue message", err, slog.String("srcpath", srcpath), slog.String("dstpath", dstpath))
-			} else if linked {
-				nlinked++
+
+			defer func() {
+				if db != nil {
+					err := db.Close()
+					xctl.log.Check(err, "closing new queue db")
+				}
+			}()
+
+			// Link/copy known message files. If a message has been removed while we read the
+			// database, our backup is not consistent and the backup will be marked failed.
+			err = bstore.QueryDB[queue.Msg](ctx, db).ForEach(func(m queue.Msg) error {
+				if m.ID > maxID {
+					maxID = m.ID
+				}
+				mp := store.MessagePath(m.ID)
+				seen[mp] = struct{}{}
+				srcpath := filepath.Join(srcDataDir, "queue", mp)
+				dstpath := filepath.Join(dstDataDir, "queue", mp)
+				if linked, err := linkOrCopy(srcpath, dstpath); err != nil {
+					xerrx("linking/copying queue message", err, slog.String("srcpath", srcpath), slog.String("dstpath", dstpath))
+				} else if linked {
+					nlinked++
+				} else {
+					ncopied++
+				}
+				return nil
+			})
+			if err != nil {
+				xerrx("processing queue messages (not backed up properly)", err, slog.Duration("duration", time.Since(tmMsgs)))
 			} else {
-				ncopied++
+				xvlog("queue message files linked/copied",
+					slog.Int("linked", nlinked),
+					slog.Int("copied", ncopied),
+					slog.Duration("duration", time.Since(tmMsgs)))
 			}
-			return nil
-		})
-		if err != nil {
-			xerrx("processing queue messages (not backed up properly)", err, slog.Duration("duration", time.Since(tmMsgs)))
-		} else {
-			xvlog("queue message files linked/copied",
-				slog.Int("linked", nlinked),
-				slog.Int("copied", ncopied),
-				slog.Duration("duration", time.Since(tmMsgs)))
 		}
 
 		// Read through all files in queue directory and warn about anything we haven't
@@ -505,9 +525,11 @@ func xbackupctl(ctx context.Context, xctl *ctl) {
 
 		tmAccount := time.Now()
 
-		// Copy database file.
+		// Copy database file (bstore only; PG data is backed up externally).
 		dbpath := filepath.Join("accounts", acc.Name, "index.db")
-		backupDB(unwrapBstore(acc.DB), dbpath)
+		if rawDB, ok := unwrapBstore(acc.DB); ok {
+			backupDB(rawDB, dbpath)
+		}
 
 		// todo: should document/check not taking a rlock on account.
 
@@ -526,60 +548,76 @@ func xbackupctl(ctx context.Context, xctl *ctl) {
 			xctl.log.Check(err, "closing junkfilter")
 		}
 
-		dstdbpath := filepath.Join(dstDataDir, dbpath)
-		opts := bstore.Options{MustExist: true, RegisterLogger: xctl.log.Logger}
-		db, err := bstore.Open(ctx, dstdbpath, &opts, store.DBTypes...)
-		if err != nil {
-			xerrx("open copied account database", err, slog.String("dstpath", dstdbpath), slog.Duration("duration", time.Since(tmAccount)))
-			return
-		}
-
-		defer func() {
-			if db != nil {
-				err := db.Close()
-				xctl.log.Check(err, "close account database")
+		// Open a read source for message enumeration. For bstore, use the
+		// already-copied destination file (consistent snapshot). For PG, use
+		// the live account DB inside a read transaction.
+		var msgSourceDB store.DB
+		if _, ok := unwrapBstore(acc.DB); ok {
+			dstdbpath := filepath.Join(dstDataDir, dbpath)
+			opts := bstore.Options{MustExist: true, RegisterLogger: xctl.log.Logger}
+			rawCopied, err := bstore.Open(ctx, dstdbpath, &opts, store.DBTypes...)
+			if err != nil {
+				xerrx("open copied account database", err, slog.String("dstpath", dstdbpath), slog.Duration("duration", time.Since(tmAccount)))
+				return
 			}
-		}()
+			copiedDB := store.NewBstoreDB(rawCopied)
+			defer func() {
+				err := copiedDB.Close()
+				xctl.log.Check(err, "close account database")
+			}()
+			msgSourceDB = copiedDB
+		} else {
+			// PG: read directly from the live DB. Minor inconsistency is
+			// acceptable; the backup help text documents that mox should not
+			// be running simultaneously.
+			msgSourceDB = acc.DB
+		}
 
 		// Link/copy known message files.
 		tmMsgs := time.Now()
 		seen := map[string]struct{}{}
 		var maxID int64
 		var nlinked, ncopied int
-		err = bstore.QueryDB[store.Message](ctx, db).FilterEqual("Expunged", false).ForEach(func(m store.Message) error {
-			if m.ID > maxID {
-				maxID = m.ID
+		var msgErr, eraseErr error
+		eraseIDs := map[int64]struct{}{}
+		msgErr = msgSourceDB.Read(ctx, func(tx store.Tx) error {
+			ferr := store.Query[store.Message](tx).FilterEqual("Expunged", false).ForEach(func(m store.Message) error {
+				if m.ID > maxID {
+					maxID = m.ID
+				}
+				mp := store.MessagePath(m.ID)
+				seen[mp] = struct{}{}
+				amp := filepath.Join("accounts", acc.Name, "msg", mp)
+				srcpath := filepath.Join(srcDataDir, amp)
+				dstpath := filepath.Join(dstDataDir, amp)
+				if linked, err := linkOrCopy(srcpath, dstpath); err != nil {
+					xerrx("linking/copying account message", err, slog.String("srcpath", srcpath), slog.String("dstpath", dstpath))
+				} else if linked {
+					nlinked++
+				} else {
+					ncopied++
+				}
+				return nil
+			})
+			if ferr != nil {
+				return ferr
 			}
-			mp := store.MessagePath(m.ID)
-			seen[mp] = struct{}{}
-			amp := filepath.Join("accounts", acc.Name, "msg", mp)
-			srcpath := filepath.Join(srcDataDir, amp)
-			dstpath := filepath.Join(dstDataDir, amp)
-			if linked, err := linkOrCopy(srcpath, dstpath); err != nil {
-				xerrx("linking/copying account message", err, slog.String("srcpath", srcpath), slog.String("dstpath", dstpath))
-			} else if linked {
-				nlinked++
-			} else {
-				ncopied++
-			}
+			eraseErr = store.Query[store.MessageErase](tx).ForEach(func(me store.MessageErase) error {
+				eraseIDs[me.ID] = struct{}{}
+				return nil
+			})
 			return nil
 		})
-		if err != nil {
-			xerrx("processing account messages (not backed up properly)", err, slog.Duration("duration", time.Since(tmMsgs)))
+		if msgErr != nil {
+			xerrx("processing account messages (not backed up properly)", msgErr, slog.Duration("duration", time.Since(tmMsgs)))
 		} else {
 			xvlog("account message files linked/copied",
 				slog.Int("linked", nlinked),
 				slog.Int("copied", ncopied),
 				slog.Duration("duration", time.Since(tmMsgs)))
 		}
-
-		eraseIDs := map[int64]struct{}{}
-		err = bstore.QueryDB[store.MessageErase](ctx, db).ForEach(func(me store.MessageErase) error {
-			eraseIDs[me.ID] = struct{}{}
-			return nil
-		})
-		if err != nil {
-			xerrx("listing erased messages", err)
+		if eraseErr != nil {
+			xerrx("listing erased messages", eraseErr)
 		}
 
 		// Read through all files in queue directory and warn about anything we haven't

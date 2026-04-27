@@ -35,15 +35,27 @@ func Init(ctx context.Context) error {
 		return fmt.Errorf("already initialized")
 	}
 	pkglog := mlog.New("store", nil)
-	p := mox.DataDirPath("auth.db")
-	os.MkdirAll(filepath.Dir(p), 0770)
-	opts := bstore.Options{Timeout: 5 * time.Second, Perm: 0660, RegisterLogger: moxvar.RegisterLogger(p, pkglog.Logger)}
-	var err error
-	db, err := bstore.Open(ctx, p, &opts, AuthDBTypes...)
-	if err != nil {
-		return err
+
+	if pgcfg := mox.Conf.Static.PostgreSQL; pgcfg != nil {
+		if Pool() == nil {
+			if _, err := InitPool(ctx, pgcfg); err != nil {
+				return fmt.Errorf("init pg pool: %w", err)
+			}
+		}
+		if err := EnsureSchema(ctx, Pool(), "auth", "auth"); err != nil {
+			return fmt.Errorf("ensure auth schema: %w", err)
+		}
+		AuthDB = NewPgDB(Pool(), "auth")
+	} else {
+		p := mox.DataDirPath("auth.db")
+		os.MkdirAll(filepath.Dir(p), 0770)
+		opts := bstore.Options{Timeout: 5 * time.Second, Perm: 0660, RegisterLogger: moxvar.RegisterLogger(p, pkglog.Logger)}
+		db, err := bstore.Open(ctx, p, &opts, AuthDBTypes...)
+		if err != nil {
+			return err
+		}
+		AuthDB = NewBstoreDB(db)
 	}
-	AuthDB = NewBstoreDB(db)
 
 	// List pending account removals, and process them one by one, committing each
 	// individually.
@@ -108,6 +120,13 @@ func Close() error {
 
 	err := AuthDB.Close()
 	AuthDB = nil
+
+	// If the pool was initialised by Init, tear it down here. Per-account
+	// PgDBs and queue.DB share the same pool but only hold references —
+	// closing the pool releases all of them at once.
+	if mox.Conf.Static.PostgreSQL != nil {
+		ClosePool()
+	}
 
 	return err
 }

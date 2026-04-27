@@ -1140,34 +1140,64 @@ func OpenAccountDB(log mlog.Log, accountDir, accountName string) (a *Account, re
 
 	dbpath := filepath.Join(accountDir, "index.db")
 
-	// Create account if it doesn't exist yet.
+	// Detect whether the account is being opened for the first time. For PG
+	// the marker is "no Upgrade row" (initAccount inserts it), checked
+	// after EnsureSchema runs. For bstore it's "index.db is missing".
 	isNew := false
-	if _, err := os.Stat(dbpath); err != nil && os.IsNotExist(err) {
-		isNew = true
-		os.MkdirAll(accountDir, 0770)
+	var bdb DB
+
+	if pgcfg := mox.Conf.Static.PostgreSQL; pgcfg != nil {
+		pool := Pool()
+		if pool == nil {
+			return nil, fmt.Errorf("opening account %q: PG pool not initialised", accountName)
+		}
+		schemaName := "account_" + accountName
+		if err := EnsureSchema(context.TODO(), pool, schemaName, "account"); err != nil {
+			return nil, fmt.Errorf("ensure account schema: %w", err)
+		}
+		bdb = NewPgDB(pool, schemaName)
+		// A fresh schema has no Upgrade rows yet; initAccount inserts
+		// upgradeInit, so its absence is the new-account signal.
+		n, err := QueryDB[Upgrade](context.TODO(), bdb).Count()
+		if err != nil {
+			bdb.Close()
+			return nil, fmt.Errorf("probing pg account schema: %w", err)
+		}
+		isNew = n == 0
+	} else {
+		if _, err := os.Stat(dbpath); err != nil && os.IsNotExist(err) {
+			isNew = true
+			os.MkdirAll(accountDir, 0770)
+		}
+
+		opts := bstore.Options{Timeout: 5 * time.Second, Perm: 0660, RegisterLogger: moxvar.RegisterLogger(dbpath, log.Logger)}
+		db, err := bstore.Open(context.TODO(), dbpath, &opts, DBTypes...)
+		if err != nil {
+			return nil, err
+		}
+
+		// Wraps raw *bstore.DB in the BstoreDB adapter so acc.DB satisfies the store.DB interface — required now that Account.DB is typed as DB not *bstore.DB
+		bdb = NewBstoreDB(db)
 	}
-
-	opts := bstore.Options{Timeout: 5 * time.Second, Perm: 0660, RegisterLogger: moxvar.RegisterLogger(dbpath, log.Logger)}
-	db, err := bstore.Open(context.TODO(), dbpath, &opts, DBTypes...)
-	if err != nil {
-		return nil, err
-	}
-
-	// Wraps raw *bstore.DB in the BstoreDB adapter so acc.DB satisfies the store.DB interface — required now that Account.DB is typed as DB not *bstore.DB
-	bdb := NewBstoreDB(db)
-
 
 	defer func() {
 		if rerr != nil {
-			// err := db.Close()
 			err := bdb.Close()
 			log.Check(err, "closing database file after error")
-			if isNew {
+			if isNew && mox.Conf.Static.PostgreSQL == nil {
 				err := os.Remove(dbpath)
 				log.Check(err, "removing new database file after error")
 			}
+			// PG: leave the schema in place. EnsureSchema is
+			// idempotent, so a retry will skip already-applied
+			// migrations and pick up where we left off.
 		}
 	}()
+
+	// err is reused throughout the rest of the function (Settings/DiskUsage
+	// bootstrap, MessageErase processing, message-id sequence sync). The
+	// branched DB open above no longer declares it at the outer scope.
+	var err error
 
 	acc := &Account{
 		Name:             accountName,

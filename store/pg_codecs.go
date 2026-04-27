@@ -4,9 +4,45 @@ import (
 	"bytes"
 	"encoding"
 	"encoding/gob"
+	"encoding/json"
 	"fmt"
 	"reflect"
 )
+
+// JSONBCodec stores arbitrary JSON-encodable Go values (maps, slices of
+// custom structs) into a PG JSONB column. Round-trip uses encoding/json,
+// matching how bstore historically stored map/slice fields. The codec is
+// exported so external packages (queue, webapi) can use it from their own
+// pg_types.go init().
+type JSONBCodec struct{}
+
+func (JSONBCodec) Encode(field reflect.Value) any {
+	raw, err := json.Marshal(field.Interface())
+	if err != nil {
+		panic(fmt.Sprintf("pg jsonb encode %s: %v", field.Type(), err))
+	}
+	// json.RawMessage is recognised by pgx as JSON/JSONB on the wire, so
+	// the column type is inferred without an explicit cast in SQL.
+	return json.RawMessage(raw)
+}
+
+func (JSONBCodec) NewScanTarget() any {
+	var rm json.RawMessage
+	return &rm
+}
+
+func (JSONBCodec) WriteScanned(target any, field reflect.Value) {
+	rm := *target.(*json.RawMessage)
+	if len(rm) == 0 || string(rm) == "null" {
+		field.Set(reflect.Zero(field.Type()))
+		return
+	}
+	dst := reflect.New(field.Type())
+	if err := json.Unmarshal(rm, dst.Interface()); err != nil {
+		panic(fmt.Sprintf("pg jsonb decode %s: %v", field.Type(), err))
+	}
+	field.Set(dst.Elem())
+}
 
 // gobCodec stores a struct as a gob-encoded BYTEA. Used for fields whose
 // element type doesn't map cleanly to a built-in PG type (SCRAM auth state,

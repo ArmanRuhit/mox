@@ -343,6 +343,25 @@ func (m MsgRetired) LastResult() MsgResult {
 
 // Init opens the queue database without starting delivery.
 func Init() error {
+	log := mlog.New("queue", nil)
+
+	if pgcfg := mox.Conf.Static.PostgreSQL; pgcfg != nil {
+		pool := store.Pool()
+		if pool == nil {
+			return fmt.Errorf("queue.Init: PG pool not initialised (store.Init must run first)")
+		}
+		if err := store.EnsureSchema(mox.Shutdown, pool, "queue", "queue"); err != nil {
+			return fmt.Errorf("ensure queue schema: %w", err)
+		}
+		DB = store.NewPgDB(pool, "queue")
+		if err := DB.Read(mox.Shutdown, func(tx store.Tx) error {
+			return metricHoldUpdate(tx)
+		}); err != nil {
+			return fmt.Errorf("open queue database: %s", err)
+		}
+		return nil
+	}
+
 	qpath := mox.DataDirPath(filepath.FromSlash("queue/index.db"))
 	os.MkdirAll(filepath.Dir(qpath), 0770)
 	isNew := false
@@ -351,7 +370,6 @@ func Init() error {
 	}
 
 	var err error
-	log := mlog.New("queue", nil)
 	opts := bstore.Options{Timeout: 5 * time.Second, Perm: 0660, RegisterLogger: moxvar.RegisterLogger(qpath, log.Logger)}
 	rawDB, err := bstore.Open(mox.Shutdown, qpath, &opts, DBTypes...)
 	if err == nil {

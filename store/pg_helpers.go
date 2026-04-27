@@ -33,6 +33,12 @@ type pgFieldCodec interface {
 	WriteScanned(target any, field reflect.Value)
 }
 
+// pgQuoteIdent double-quotes a PostgreSQL identifier so reserved keywords and
+// mixed-case names are always safe. Any embedded double-quote is escaped by doubling.
+func pgQuoteIdent(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
 // fieldByPath resolves a dotted struct path against rv. Used both for read
 // (Encode) and for obtaining an addressable target (Scan). Panics — like
 // other reflect mistakes — when the path is wrong, since it's a coding error.
@@ -67,15 +73,19 @@ func buildSimpleHandler[T any](table string, specs []pgFieldSpec) *pgTypeHandler
 		panic("pg: no PK field for " + table)
 	}
 
+	qTable := pgQuoteIdent(table)
+	qPKCol := pgQuoteIdent(pkSpec.Column)
+
 	cols := make([]string, len(specs))
 	field2col := make(map[string]string, len(specs))
 	for i, s := range specs {
-		cols[i] = s.Column
+		qcol := pgQuoteIdent(s.Column)
+		cols[i] = qcol
 		// Register both full path and last segment so callers can use
 		// either "Total" or "MailboxCounts.Total".
-		field2col[s.Field] = s.Column
+		field2col[s.Field] = qcol
 		if dot := strings.LastIndexByte(s.Field, '.'); dot >= 0 {
-			field2col[s.Field[dot+1:]] = s.Column
+			field2col[s.Field[dot+1:]] = qcol
 		}
 	}
 
@@ -85,7 +95,7 @@ func buildSimpleHandler[T any](table string, specs []pgFieldSpec) *pgTypeHandler
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
 	}
 	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
-		table, colList, strings.Join(placeholders, ", "))
+		qTable, colList, strings.Join(placeholders, ", "))
 
 	// UPDATE: set non-PK cols, key on PK as last placeholder.
 	setParts := make([]string, 0, len(cols)-1)
@@ -95,13 +105,13 @@ func buildSimpleHandler[T any](table string, specs []pgFieldSpec) *pgTypeHandler
 			continue
 		}
 		idx++
-		setParts = append(setParts, fmt.Sprintf("%s = $%d", s.Column, idx))
+		setParts = append(setParts, fmt.Sprintf("%s = $%d", pgQuoteIdent(s.Column), idx))
 	}
 	updateSQL := fmt.Sprintf("UPDATE %s SET %s WHERE %s = $%d",
-		table, strings.Join(setParts, ", "), pkSpec.Column, idx+1)
+		qTable, strings.Join(setParts, ", "), qPKCol, idx+1)
 
-	deleteSQL := fmt.Sprintf("DELETE FROM %s WHERE %s = $1", table, pkSpec.Column)
-	getSQL := fmt.Sprintf("SELECT %s FROM %s WHERE %s = $1", colList, table, pkSpec.Column)
+	deleteSQL := fmt.Sprintf("DELETE FROM %s WHERE %s = $1", qTable, qPKCol)
+	getSQL := fmt.Sprintf("SELECT %s FROM %s WHERE %s = $1", colList, qTable, qPKCol)
 
 	encode := func(rv reflect.Value, s pgFieldSpec) any {
 		fv := fieldByPath(rv, s.Field)
@@ -225,18 +235,19 @@ func buildSimpleHandler[T any](table string, specs []pgFieldSpec) *pgTypeHandler
 			if fv.IsZero() {
 				continue
 			}
+			qcol := pgQuoteIdent(s.Column)
 			if s.Codec != nil {
-				out[s.Column] = s.Codec.Encode(fv)
+				out[qcol] = s.Codec.Encode(fv)
 				continue
 			}
-			out[s.Column] = fv.Interface()
+			out[qcol] = fv.Interface()
 		}
 		return out
 	}
 
 	return &pgTypeHandler[T]{
-		Table:         table,
-		PKColumn:      pkSpec.Column,
+		Table:         qTable,
+		PKColumn:      qPKCol,
 		PKField:       pkSpec.Field,
 		Columns:       cols,
 		FieldToColumn: field2col,

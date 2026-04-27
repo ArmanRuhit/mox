@@ -138,6 +138,7 @@ var commands = []struct {
 	{"localserve", cmdLocalserve},
 	{"help", cmdHelp},
 	{"backup", cmdBackup},
+	{"pg migrate", cmdPgMigrate},
 	{"verifydata", cmdVerifydata},
 	{"licenses", cmdLicenses},
 

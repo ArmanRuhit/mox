@@ -76,11 +76,15 @@ func QueryDB[T any](ctx context.Context, db DB) *TypedQuery[T] {
 	case *BstoreDB:
 		return &TypedQuery[T]{bq: bstore.QueryDB[T](ctx, d.db)}
 	case *PgDB:
-		// Uses the pool directly; the pool is configured (Step 11) with an
-		// AfterConnect hook that sets search_path so per-call schema setup
-		// isn't needed. For multi-statement work prefer wrapping in
-		// db.Read/Write so a single connection is held.
-		return &TypedQuery[T]{pg: newPgQuery[T](ctx, d.pool)}
+		// Uses a short transaction with SET LOCAL search_path so the query
+		// targets the correct per-component schema. withSchema opens the tx
+		// lazily when a terminal method (List/Count/Delete/…) is called.
+		return &TypedQuery[T]{pg: &pgQuery[T]{
+			ctx:     ctx,
+			pool:    d.pool,
+			schema:  d.searchPath,
+			handler: lookupPgHandler[T](),
+		}}
 	default:
 		panic("QueryDB: unknown DB backend")
 	}

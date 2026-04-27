@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // pgFilter is one WHERE-clause fragment.
@@ -28,7 +29,9 @@ type pgSort struct {
 // State-tracking only until a terminal method (List/Get/Count/...) executes the SQL.
 type pgQuery[T any] struct {
 	ctx     context.Context
-	exec    pgxExecutor
+	exec    pgxExecutor     // non-nil on the Query(tx) path; nil on the QueryDB path
+	pool    *pgxpool.Pool   // non-nil on the QueryDB path; nil on the Query(tx) path
+	schema  string          // component schema (e.g. "queue") set on the QueryDB path
 	handler *pgTypeHandler[T]
 
 	filters   []pgFilter
@@ -41,9 +44,8 @@ type pgQuery[T any] struct {
 	err error
 }
 
-// newPgQuery constructs a query against handler-registered type T.
-// Schema selection is the caller's responsibility (typically via SET search_path
-// at the start of the transaction).
+// newPgQuery constructs a query that runs inside an already-opened transaction.
+// The transaction's search_path must already be set by the caller (applySearchPath).
 func newPgQuery[T any](ctx context.Context, exec pgxExecutor) *pgQuery[T] {
 	return &pgQuery[T]{
 		ctx:     ctx,
@@ -266,14 +268,45 @@ nextRow:
 	return out
 }
 
-// fetchAll runs the SELECT and scans all rows.
-func (q *pgQuery[T]) fetchAll() ([]T, error) {
-	if q.err != nil {
-		return nil, q.err
+// withSchema runs fn against an executor that has the correct search_path set.
+// On the Query(tx) path (pool == nil) the tx already has search_path and fn is
+// called directly. On the QueryDB(pool) path a short transaction is opened,
+// SET LOCAL search_path is applied, and the transaction is committed/rolled-back
+// after fn returns.
+func (q *pgQuery[T]) withSchema(writable bool, fn func(exec pgxExecutor) error) error {
+	if q.pool == nil {
+		// Already inside a transaction with search_path set.
+		return fn(q.exec)
 	}
+	conn, err := q.pool.Acquire(q.ctx)
+	if err != nil {
+		return fmt.Errorf("pg acquire: %w", err)
+	}
+	defer conn.Release()
+	mode := pgx.ReadOnly
+	if writable {
+		mode = pgx.ReadWrite
+	}
+	tx, err := conn.BeginTx(q.ctx, pgx.TxOptions{AccessMode: mode})
+	if err != nil {
+		return fmt.Errorf("pg begin: %w", err)
+	}
+	if err := applySearchPath(q.ctx, tx, q.schema); err != nil {
+		tx.Rollback(q.ctx) //nolint:errcheck
+		return err
+	}
+	if err := fn(tx); err != nil {
+		tx.Rollback(q.ctx) //nolint:errcheck
+		return err
+	}
+	return tx.Commit(q.ctx)
+}
+
+// fetchAllWithExec runs the SELECT against exec and returns the scanned rows.
+func (q *pgQuery[T]) fetchAllWithExec(exec pgxExecutor) ([]T, error) {
 	cols := strings.Join(q.handler.Columns, ", ")
 	sql, args := q.buildSelect(cols)
-	rows, err := q.exec.Query(q.ctx, sql, args...)
+	rows, err := exec.Query(q.ctx, sql, args...)
 	if err != nil {
 		return nil, fmt.Errorf("pg query %s: %w", q.handler.Table, err)
 	}
@@ -285,8 +318,21 @@ func (q *pgQuery[T]) fetchAll() ([]T, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	out = q.applyFilterFns(out)
-	return out, nil
+	return q.applyFilterFns(out), nil
+}
+
+// fetchAll runs the SELECT, applying search_path wrapping when on the QueryDB path.
+func (q *pgQuery[T]) fetchAll() ([]T, error) {
+	if q.err != nil {
+		return nil, q.err
+	}
+	var out []T
+	err := q.withSchema(false, func(exec pgxExecutor) error {
+		var err error
+		out, err = q.fetchAllWithExec(exec)
+		return err
+	})
+	return out, err
 }
 
 func (q *pgQuery[T]) List() ([]T, error) {
@@ -338,14 +384,16 @@ func (q *pgQuery[T]) Count() (int, error) {
 	if q.err != nil {
 		return 0, q.err
 	}
-	sql, args := q.buildSelect("COUNT(*)")
-	// Strip ORDER BY for COUNT — accepted by PG but pointless.
-	sql = stripOrderBy(sql)
 	var n int
-	if err := q.exec.QueryRow(q.ctx, sql, args...).Scan(&n); err != nil {
-		return 0, fmt.Errorf("pg count %s: %w", q.handler.Table, err)
-	}
-	return n, nil
+	err := q.withSchema(false, func(exec pgxExecutor) error {
+		sql, args := q.buildSelect("COUNT(*)")
+		sql = stripOrderBy(sql)
+		if err := exec.QueryRow(q.ctx, sql, args...).Scan(&n); err != nil {
+			return fmt.Errorf("pg count %s: %w", q.handler.Table, err)
+		}
+		return nil
+	})
+	return n, err
 }
 
 func (q *pgQuery[T]) Exists() (bool, error) {
@@ -356,20 +404,25 @@ func (q *pgQuery[T]) Exists() (bool, error) {
 	if q.err != nil {
 		return false, q.err
 	}
-	old := q.limit
-	q.limit = 1
-	sql, args := q.buildSelect("1")
-	q.limit = old
-	row := q.exec.QueryRow(q.ctx, sql, args...)
-	var dummy int
-	err := row.Scan(&dummy)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("pg exists %s: %w", q.handler.Table, err)
-	}
-	return true, nil
+	var exists bool
+	err := q.withSchema(false, func(exec pgxExecutor) error {
+		old := q.limit
+		q.limit = 1
+		sql, args := q.buildSelect("1")
+		q.limit = old
+		var dummy int
+		err := exec.QueryRow(q.ctx, sql, args...).Scan(&dummy)
+		if errors.Is(err, pgx.ErrNoRows) {
+			exists = false
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("pg exists %s: %w", q.handler.Table, err)
+		}
+		exists = true
+		return nil
+	})
+	return exists, err
 }
 
 func (q *pgQuery[T]) ForEach(fn func(T) error) error {
@@ -401,24 +454,34 @@ func (q *pgQuery[T]) Delete() (int, error) {
 		if len(ids) == 0 {
 			return 0, nil
 		}
-		tag, err := q.exec.Exec(q.ctx,
-			"DELETE FROM "+q.handler.Table+" WHERE "+q.handler.PKColumn+" = ANY($1)", ids)
+		var n int
+		err = q.withSchema(true, func(exec pgxExecutor) error {
+			tag, err := exec.Exec(q.ctx,
+				"DELETE FROM "+q.handler.Table+" WHERE "+q.handler.PKColumn+" = ANY($1)", ids)
+			if err != nil {
+				return fmt.Errorf("pg delete %s: %w", q.handler.Table, err)
+			}
+			n = int(tag.RowsAffected())
+			return nil
+		})
+		return n, err
+	}
+	var n int
+	err := q.withSchema(true, func(exec pgxExecutor) error {
+		where, args, _ := q.composeWhere(0)
+		tag, err := exec.Exec(q.ctx, "DELETE FROM "+q.handler.Table+where, args...)
 		if err != nil {
-			return 0, fmt.Errorf("pg delete %s: %w", q.handler.Table, err)
+			return fmt.Errorf("pg delete %s: %w", q.handler.Table, err)
 		}
-		return int(tag.RowsAffected()), nil
-	}
-	where, args, _ := q.composeWhere(0)
-	tag, err := q.exec.Exec(q.ctx, "DELETE FROM "+q.handler.Table+where, args...)
-	if err != nil {
-		return 0, fmt.Errorf("pg delete %s: %w", q.handler.Table, err)
-	}
-	return int(tag.RowsAffected()), nil
+		n = int(tag.RowsAffected())
+		return nil
+	})
+	return n, err
 }
 
 func (q *pgQuery[T]) UpdateFields(fields map[string]any) (int, error) {
 	if q.err != nil {
-		return 0, q.err
+		return 0, fmt.Errorf("pg update %s: empty fields map", q.handler.Table)
 	}
 	if len(fields) == 0 {
 		return 0, fmt.Errorf("pg update %s: empty fields map", q.handler.Table)
@@ -456,23 +519,33 @@ func (q *pgQuery[T]) runUpdate(setClause string, setArgs []any, startIdx int) (i
 		if len(ids) == 0 {
 			return 0, nil
 		}
-		args := append(setArgs, ids)
-		sql := fmt.Sprintf("UPDATE %s SET %s WHERE %s = ANY($%d)",
-			q.handler.Table, setClause, q.handler.PKColumn, startIdx+1)
-		tag, err := q.exec.Exec(q.ctx, sql, args...)
+		var n int
+		err = q.withSchema(true, func(exec pgxExecutor) error {
+			args := append(setArgs, ids)
+			sql := fmt.Sprintf("UPDATE %s SET %s WHERE %s = ANY($%d)",
+				q.handler.Table, setClause, q.handler.PKColumn, startIdx+1)
+			tag, err := exec.Exec(q.ctx, sql, args...)
+			if err != nil {
+				return fmt.Errorf("pg update %s: %w", q.handler.Table, err)
+			}
+			n = int(tag.RowsAffected())
+			return nil
+		})
+		return n, err
+	}
+	var n int
+	err := q.withSchema(true, func(exec pgxExecutor) error {
+		where, whereArgs, _ := q.composeWhere(startIdx)
+		args := append(setArgs, whereArgs...)
+		sql := "UPDATE " + q.handler.Table + " SET " + setClause + where
+		tag, err := exec.Exec(q.ctx, sql, args...)
 		if err != nil {
-			return 0, fmt.Errorf("pg update %s: %w", q.handler.Table, err)
+			return fmt.Errorf("pg update %s: %w", q.handler.Table, err)
 		}
-		return int(tag.RowsAffected()), nil
-	}
-	where, whereArgs, _ := q.composeWhere(startIdx)
-	args := append(setArgs, whereArgs...)
-	sql := "UPDATE " + q.handler.Table + " SET " + setClause + where
-	tag, err := q.exec.Exec(q.ctx, sql, args...)
-	if err != nil {
-		return 0, fmt.Errorf("pg update %s: %w", q.handler.Table, err)
-	}
-	return int(tag.RowsAffected()), nil
+		n = int(tag.RowsAffected())
+		return nil
+	})
+	return n, err
 }
 
 // fetchPKs returns the primary keys for rows matching all filters, including FilterFns.
