@@ -785,6 +785,28 @@ See https://pkg.go.dev/github.com/mjl-/sconf for details.
 	# (optional)
 	QuotaMessageSize: 0
 
+	# Optional PostgreSQL backend for the auth, account index and queue databases.
+	# When set, mox uses PostgreSQL instead of the default embedded bstore. Message
+	# files remain on the filesystem under DataDir. (optional)
+	PostgreSQL:
+
+		# PostgreSQL connection string in libpq URI or keyword=value form, e.g.
+		# postgres://user:pass@host:5432/mox?sslmode=require. Mutually exclusive with
+		# DSNFile. (optional)
+		DSN:
+
+		# Path to a file containing the PostgreSQL connection string. Useful to keep
+		# credentials out of mox.conf. Evaluated relative to the directory of mox.conf.
+		# Mutually exclusive with DSN. (optional)
+		DSNFile:
+
+		# Maximum number of connections in the pgx pool. Default 10. (optional)
+		MaxConns: 0
+
+		# Minimum number of idle connections kept warm in the pgx pool. Default 0.
+		# (optional)
+		MinConns: 0
+
 # domains.conf
 
 	# NOTE: This config file is in 'sconf' format. Indent with tabs. Comments must be

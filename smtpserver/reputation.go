@@ -7,8 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mjl-/bstore"
-
 	"github.com/mjl-/mox/dns"
 	"github.com/mjl-/mox/mlog"
 	"github.com/mjl-/mox/smtp"
@@ -99,7 +97,7 @@ const (
 // ../rfc/6376:1915
 // ../rfc/6376:3716
 // ../rfc/7208:2167
-func reputation(tx *bstore.Tx, log mlog.Log, m *store.Message, smtputf8 bool) (rjunk *bool, rconclusive bool, rmethod reputationMethod, reasonText string, rerr error) {
+func reputation(tx store.Tx, log mlog.Log, m *store.Message, smtputf8 bool) (rjunk *bool, rconclusive bool, rmethod reputationMethod, reasonText string, rerr error) {
 	boolptr := func(v bool) *bool {
 		return &v
 	}
@@ -124,8 +122,8 @@ func reputation(tx *bstore.Tx, log mlog.Log, m *store.Message, smtputf8 bool) (r
 
 	// messageQuery returns a base query for historic seen messages to the same
 	// mailbox, at most maxAge old, and at most maxCount messages.
-	messageQuery := func(fm *store.Message, maxAge time.Duration, maxCount int) *bstore.Query[store.Message] {
-		q := bstore.QueryTx[store.Message](tx)
+	messageQuery := func(fm *store.Message, maxAge time.Duration, maxCount int) *store.TypedQuery[store.Message] {
+		q := store.Query[store.Message](tx)
 		q.FilterEqual("MailboxOrigID", m.MailboxID)
 		q.FilterEqual("Expunged", false)
 		q.FilterFn(func(m store.Message) bool {
@@ -141,7 +139,7 @@ func reputation(tx *bstore.Tx, log mlog.Log, m *store.Message, smtputf8 bool) (r
 	}
 
 	// Execute the query, returning messages or returning error through panic.
-	xmessageList := func(q *bstore.Query[store.Message], descr string) []store.Message {
+	xmessageList := func(q *store.TypedQuery[store.Message], descr string) []store.Message {
 		t0 := time.Now()
 		l, err := q.List()
 		log.Debugx("querying messages for reputation", err,
@@ -154,7 +152,7 @@ func reputation(tx *bstore.Tx, log mlog.Log, m *store.Message, smtputf8 bool) (r
 		return l
 	}
 
-	xrecipientExists := func(q *bstore.Query[store.Recipient]) bool {
+	xrecipientExists := func(q *store.TypedQuery[store.Recipient]) bool {
 		exists, err := q.Exists()
 		if err != nil {
 			panic(queryError(fmt.Sprintf("checking for recipient: %v", err)))
@@ -196,7 +194,7 @@ func reputation(tx *bstore.Tx, log mlog.Log, m *store.Message, smtputf8 bool) (r
 		}
 
 		// Look if we ever sent to this address. If so, we accept,
-		qr := bstore.QueryTx[store.Recipient](tx)
+		qr := store.Query[store.Recipient](tx)
 		qr.FilterEqual("Localpart", m.MsgFromLocalpart)
 		qr.FilterEqual("Domain", m.MsgFromDomain)
 		qr.FilterGreaterEqual("Sent", now.Add(-3*year))
@@ -267,7 +265,7 @@ func reputation(tx *bstore.Tx, log mlog.Log, m *store.Message, smtputf8 bool) (r
 			}
 
 			// Look if we ever sent to this address. If so, we accept,
-			qr := bstore.QueryTx[store.Recipient](tx)
+			qr := store.Query[store.Recipient](tx)
 			if orgdomain {
 				qr.FilterEqual("OrgDomain", m.MsgFromOrgDomain)
 				method = methodMsgtoOrgDomain

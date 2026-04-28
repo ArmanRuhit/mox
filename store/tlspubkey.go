@@ -11,9 +11,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/mjl-/bstore"
-
 	"github.com/mjl-/mox/smtp"
 )
 
@@ -75,7 +72,7 @@ func ParseTLSPublicKeyCert(certDER []byte) (TLSPublicKey, error) {
 // TLSPublicKeyList returns tls public keys. If accountOpt is empty, keys for all
 // accounts are returned.
 func TLSPublicKeyList(ctx context.Context, accountOpt string) ([]TLSPublicKey, error) {
-	q := bstore.QueryDB[TLSPublicKey](ctx, AuthDB)
+	q := QueryDB[TLSPublicKey](ctx, AuthDB)
 	if accountOpt != "" {
 		q.FilterNonzero(TLSPublicKey{Account: accountOpt})
 	}
@@ -83,7 +80,7 @@ func TLSPublicKeyList(ctx context.Context, accountOpt string) ([]TLSPublicKey, e
 }
 
 // TLSPublicKeyGet retrieves a single tls public key by fingerprint.
-// If absent, bstore.ErrAbsent is returned.
+// If absent, ErrAbsent is returned.
 func TLSPublicKeyGet(ctx context.Context, fingerprint string) (TLSPublicKey, error) {
 	pubKey := TLSPublicKey{Fingerprint: fingerprint}
 	err := AuthDB.Get(ctx, &pubKey)
@@ -128,8 +125,8 @@ func TLSPublicKeyRemove(ctx context.Context, fingerprint string) error {
 }
 
 // tlsPublicKeyRemoveForAccount removes all tls public keys for an account.
-func tlsPublicKeyRemoveForAccount(tx *bstore.Tx, account string) error {
-	q := bstore.QueryTx[TLSPublicKey](tx)
+func tlsPublicKeyRemoveForAccount(tx Tx, account string) error {
+	q := Query[TLSPublicKey](tx)
 	q.FilterNonzero(TLSPublicKey{Account: account})
 	_, err := q.Delete()
 	return err

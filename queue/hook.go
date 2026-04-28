@@ -18,8 +18,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
-	"github.com/mjl-/bstore"
-
 	"github.com/mjl-/mox/dns"
 	"github.com/mjl-/mox/dsn"
 	"github.com/mjl-/mox/message"
@@ -196,7 +194,7 @@ func cleanupHookRetired(done chan struct{}) {
 }
 
 func cleanupHookRetiredSingle(log mlog.Log) {
-	n, err := bstore.QueryDB[HookRetired](mox.Shutdown, DB).FilterLess("KeepUntil", time.Now()).Delete()
+	n, err := store.QueryDB[HookRetired](mox.Shutdown, DB).FilterLess("KeepUntil", time.Now()).Delete()
 	log.Check(err, "removing old retired webhooks")
 	if n > 0 {
 		log.Debug("cleaned up retired webhooks", slog.Int("count", n))
@@ -226,7 +224,7 @@ type HookFilter struct {
 	Event       string // Including "incoming".
 }
 
-func (f HookFilter) apply(q *bstore.Query[Hook]) error {
+func (f HookFilter) apply(q *store.TypedQuery[Hook]) error {
 	if len(f.IDs) > 0 {
 		q.FilterIDs(f.IDs)
 	}
@@ -287,7 +285,7 @@ type HookSort struct {
 	Asc    bool   // Ascending, or descending.
 }
 
-func (s HookSort) apply(q *bstore.Query[Hook]) error {
+func (s HookSort) apply(q *store.TypedQuery[Hook]) error {
 	switch s.Field {
 	case "", "NextAttempt":
 		s.Field = "NextAttempt"
@@ -338,12 +336,12 @@ func (s HookSort) apply(q *bstore.Query[Hook]) error {
 
 // HookQueueSize returns the number of webhooks in the queue.
 func HookQueueSize(ctx context.Context) (int, error) {
-	return bstore.QueryDB[Hook](ctx, DB).Count()
+	return store.QueryDB[Hook](ctx, DB).Count()
 }
 
 // HookList returns webhooks according to filter and sort.
 func HookList(ctx context.Context, filter HookFilter, sort HookSort) ([]Hook, error) {
-	q := bstore.QueryDB[Hook](ctx, DB)
+	q := store.QueryDB[Hook](ctx, DB)
 	if err := filter.apply(q); err != nil {
 		return nil, err
 	}
@@ -367,7 +365,7 @@ type HookRetiredFilter struct {
 	Event        string // Including "incoming".
 }
 
-func (f HookRetiredFilter) apply(q *bstore.Query[HookRetired]) error {
+func (f HookRetiredFilter) apply(q *store.TypedQuery[HookRetired]) error {
 	if len(f.IDs) > 0 {
 		q.FilterIDs(f.IDs)
 	}
@@ -428,7 +426,7 @@ type HookRetiredSort struct {
 	Asc    bool   // Ascending, or descending.
 }
 
-func (s HookRetiredSort) apply(q *bstore.Query[HookRetired]) error {
+func (s HookRetiredSort) apply(q *store.TypedQuery[HookRetired]) error {
 	switch s.Field {
 	case "", "LastActivity":
 		s.Field = "LastActivity"
@@ -479,7 +477,7 @@ func (s HookRetiredSort) apply(q *bstore.Query[HookRetired]) error {
 
 // HookRetiredList returns retired webhooks according to filter and sort.
 func HookRetiredList(ctx context.Context, filter HookRetiredFilter, sort HookRetiredSort) ([]HookRetired, error) {
-	q := bstore.QueryDB[HookRetired](ctx, DB)
+	q := store.QueryDB[HookRetired](ctx, DB)
 	if err := filter.apply(q); err != nil {
 		return nil, err
 	}
@@ -492,8 +490,8 @@ func HookRetiredList(ctx context.Context, filter HookRetiredFilter, sort HookRet
 // HookNextAttemptAdd adds a duration to the NextAttempt for all matching messages, and
 // kicks the queue.
 func HookNextAttemptAdd(ctx context.Context, filter HookFilter, d time.Duration) (affected int, err error) {
-	err = DB.Write(ctx, func(tx *bstore.Tx) error {
-		q := bstore.QueryTx[Hook](tx)
+	err = DB.Write(ctx, func(tx store.Tx) error {
+		q := store.Query[Hook](tx)
 		if err := filter.apply(q); err != nil {
 			return err
 		}
@@ -520,7 +518,7 @@ func HookNextAttemptAdd(ctx context.Context, filter HookFilter, d time.Duration)
 // HookNextAttemptSet sets NextAttempt for all matching messages to a new absolute
 // time and kicks the queue.
 func HookNextAttemptSet(ctx context.Context, filter HookFilter, t time.Time) (affected int, err error) {
-	q := bstore.QueryDB[Hook](ctx, DB)
+	q := store.QueryDB[Hook](ctx, DB)
 	if err := filter.apply(q); err != nil {
 		return 0, err
 	}
@@ -536,8 +534,8 @@ func HookNextAttemptSet(ctx context.Context, filter HookFilter, t time.Time) (af
 // retired list if configured.
 func HookCancel(ctx context.Context, log mlog.Log, filter HookFilter) (affected int, err error) {
 	var hooks []Hook
-	err = DB.Write(ctx, func(tx *bstore.Tx) error {
-		q := bstore.QueryTx[Hook](tx)
+	err = DB.Write(ctx, func(tx store.Tx) error {
+		q := store.Query[Hook](tx)
 		if err := filter.apply(q); err != nil {
 			return err
 		}
@@ -661,9 +659,9 @@ func Incoming(ctx context.Context, log mlog.Log, acc *store.Account, messageID s
 	var queueMsgID int64
 	var subject string
 	if fromID != "" {
-		err := DB.Write(ctx, func(tx *bstore.Tx) (rerr error) {
-			mr, err := bstore.QueryTx[MsgRetired](tx).FilterNonzero(MsgRetired{FromID: fromID}).Get()
-			if err == bstore.ErrAbsent {
+		err := DB.Write(ctx, func(tx store.Tx) (rerr error) {
+			mr, err := store.Query[MsgRetired](tx).FilterNonzero(MsgRetired{FromID: fromID}).Get()
+			if err == store.ErrAbsent {
 				log.Debug("no original message found for fromid", slog.String("fromid", fromID))
 				return nil
 			} else if err != nil {
@@ -899,7 +897,7 @@ func Incoming(ctx context.Context, log mlog.Log, acc *store.Account, messageID s
 		Submitted:     now,
 		NextAttempt:   now,
 	}
-	err = DB.Write(ctx, func(tx *bstore.Tx) error {
+	err = DB.Write(ctx, func(tx store.Tx) error {
 		if err := hookInsert(tx, &h, now, accConf.KeepRetiredWebhookPeriod); err != nil {
 			return fmt.Errorf("queueing webhook for incoming message: %v", err)
 		}
@@ -979,7 +977,7 @@ func parseSMTPCodes(line string) (code int, secode string) {
 
 // Insert hook into database, but first retire any existing pending hook for
 // QueueMsgID if it is > 0.
-func hookInsert(tx *bstore.Tx, h *Hook, now time.Time, accountKeepPeriod time.Duration) error {
+func hookInsert(tx store.Tx, h *Hook, now time.Time, accountKeepPeriod time.Duration) error {
 	if err := tx.Insert(h); err != nil {
 		return fmt.Errorf("insert webhook: %v", err)
 	}
@@ -988,8 +986,8 @@ func hookInsert(tx *bstore.Tx, h *Hook, now time.Time, accountKeepPeriod time.Du
 	}
 
 	// Find existing queued hook for previously msgid from queue. Can be at most one.
-	oh, err := bstore.QueryTx[Hook](tx).FilterNonzero(Hook{QueueMsgID: h.QueueMsgID}).FilterNotEqual("ID", h.ID).Get()
-	if err == bstore.ErrAbsent {
+	oh, err := store.Query[Hook](tx).FilterNonzero(Hook{QueueMsgID: h.QueueMsgID}).FilterNotEqual("ID", h.ID).Get()
+	if err == store.ErrAbsent {
 		return nil
 	} else if err != nil {
 		return fmt.Errorf("get existing webhook before inserting new hook for same queuemsgid %d", h.QueueMsgID)
@@ -1070,7 +1068,7 @@ func startHookQueue(done chan struct{}) {
 }
 
 func hookNextWork(ctx context.Context, log mlog.Log, busyURLs map[string]struct{}) time.Duration {
-	q := bstore.QueryDB[Hook](ctx, DB)
+	q := store.QueryDB[Hook](ctx, DB)
 	if len(busyURLs) > 0 {
 		var urls []any
 		for u := range busyURLs {
@@ -1081,7 +1079,7 @@ func hookNextWork(ctx context.Context, log mlog.Log, busyURLs map[string]struct{
 	q.SortAsc("NextAttempt")
 	q.Limit(1)
 	h, err := q.Get()
-	if err == bstore.ErrAbsent {
+	if err == store.ErrAbsent {
 		return 24 * time.Hour
 	} else if err != nil {
 		log.Errorx("finding time for next webhook delivery attempt", err)
@@ -1091,7 +1089,7 @@ func hookNextWork(ctx context.Context, log mlog.Log, busyURLs map[string]struct{
 }
 
 func hookLaunchWork(log mlog.Log, busyURLs map[string]struct{}) int {
-	q := bstore.QueryDB[Hook](mox.Shutdown, DB)
+	q := store.QueryDB[Hook](mox.Shutdown, DB)
 	q.FilterLessEqual("NextAttempt", time.Now())
 	q.SortAsc("NextAttempt")
 	q.Limit(maxConcurrentHookDeliveries)
@@ -1187,8 +1185,8 @@ func hookDeliver(log mlog.Log, h Hook) {
 	if err != nil && h.Attempts <= len(hookIntervals) {
 		// We'll try again later, so only update existing record.
 		qlog.Debugx("webhook delivery failed, will try again later", err)
-		xerr := DB.Write(context.Background(), func(tx *bstore.Tx) error {
-			if err := tx.Update(&h); err == bstore.ErrAbsent {
+		xerr := DB.Write(context.Background(), func(tx store.Tx) error {
+			if err := tx.Update(&h); err == store.ErrAbsent {
 				return updateRetiredHook(tx, h, result)
 			} else if err != nil {
 				return fmt.Errorf("update webhook after retryable failure: %v", err)
@@ -1202,8 +1200,8 @@ func hookDeliver(log mlog.Log, h Hook) {
 	qlog.Debugx("webhook delivery completed", err, slog.Bool("success", result.Success))
 
 	// Move Hook to HookRetired.
-	err = DB.Write(context.Background(), func(tx *bstore.Tx) error {
-		if err := tx.Delete(&h); err == bstore.ErrAbsent {
+	err = DB.Write(context.Background(), func(tx store.Tx) error {
+		if err := tx.Delete(&h); err == store.ErrAbsent {
 			return updateRetiredHook(tx, h, result)
 		} else if err != nil {
 			return fmt.Errorf("removing webhook from database: %v", err)
@@ -1220,7 +1218,7 @@ func hookDeliver(log mlog.Log, h Hook) {
 	qlog.Check(err, "moving delivered webhook from to retired hooks")
 }
 
-func updateRetiredHook(tx *bstore.Tx, h Hook, result *HookResult) error {
+func updateRetiredHook(tx store.Tx, h Hook, result *HookResult) error {
 	// Hook is gone. It may have been superseded and moved to HookRetired while we were
 	// delivering it. If so, add the result to the retired hook.
 	hr := HookRetired{ID: h.ID}

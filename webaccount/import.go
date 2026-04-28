@@ -24,8 +24,6 @@ import (
 
 	"golang.org/x/text/unicode/norm"
 
-	"github.com/mjl-/bstore"
-
 	"github.com/mjl-/mox/message"
 	"github.com/mjl-/mox/metrics"
 	"github.com/mjl-/mox/mlog"
@@ -280,7 +278,7 @@ func importStart(log mlog.Log, accName string, f *os.File, skipMailboxPrefix str
 
 // importMessages imports the messages from zip/tgz file f.
 // importMessages is responsible for unlocking and closing acc, and closing tx and f.
-func importMessages(ctx context.Context, log mlog.Log, token string, acc *store.Account, tx *bstore.Tx, zr *zip.Reader, tr *tar.Reader, f *os.File, skipMailboxPrefix string) {
+func importMessages(ctx context.Context, log mlog.Log, token string, acc *store.Account, tx store.Tx, zr *zip.Reader, tr *tar.Reader, f *os.File, skipMailboxPrefix string) {
 	// If a fatal processing error occurs, we panic with this type.
 	type importError struct{ Err error }
 

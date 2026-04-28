@@ -37,8 +37,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
-	"github.com/mjl-/bstore"
-
 	"github.com/mjl-/mox/config"
 	"github.com/mjl-/mox/dkim"
 	"github.com/mjl-/mox/dmarc"
@@ -540,7 +538,7 @@ func (c *conn) tlsClientAuthVerifyPeerCertParsed(cert *x509.Certificate) error {
 	la.TLSPubKeyFingerprint = fp
 	pubKey, err := store.TLSPublicKeyGet(context.TODO(), fp)
 	if err != nil {
-		if err == bstore.ErrAbsent {
+		if err == store.ErrAbsent {
 			la.Result = store.AuthBadCredentials
 		}
 		return fmt.Errorf("looking up tls public key with fingerprint %s, subject %q, issuer %q: %v", fp, cert.Subject, cert.Issuer, err)
@@ -1494,9 +1492,9 @@ func (c *conn) cmdAuth(p *parser) {
 		la.AccountName = account.Name
 		var ipadhash, opadhash hash.Hash
 		account.WithRLock(func() {
-			err := account.DB.Read(context.TODO(), func(tx *bstore.Tx) error {
-				password, err := bstore.QueryTx[store.Password](tx).Get()
-				if err == bstore.ErrAbsent {
+			err := account.DB.Read(context.TODO(), func(tx store.Tx) error {
+				password, err := store.Query[store.Password](tx).Get()
+				if err == store.ErrAbsent {
 					c.log.Info("failed authentication attempt", slog.String("username", username), slog.Any("remote", c.remoteIP))
 					xsmtpUserErrorf(smtp.C535AuthBadCreds, smtp.SePol7AuthBadCreds8, "bad user/pass")
 				}
@@ -1575,9 +1573,9 @@ func (c *conn) cmdAuth(p *parser) {
 		}
 		var xscram store.SCRAM
 		account.WithRLock(func() {
-			err := account.DB.Read(context.TODO(), func(tx *bstore.Tx) error {
-				password, err := bstore.QueryTx[store.Password](tx).Get()
-				if err == bstore.ErrAbsent {
+			err := account.DB.Read(context.TODO(), func(tx store.Tx) error {
+				password, err := store.Query[store.Password](tx).Get()
+				if err == store.ErrAbsent {
 					c.log.Info("failed authentication attempt", slog.String("username", username), slog.Any("remote", c.remoteIP))
 					xsmtpUserErrorf(smtp.C535AuthBadCreds, smtp.SePol7AuthBadCreds8, "bad user/pass")
 				}
@@ -2385,7 +2383,7 @@ func (c *conn) submit(ctx context.Context, recvHdrFor func(string) string, msgWr
 	}
 
 	// Check outgoing message rate limit.
-	err = c.account.DB.Read(ctx, func(tx *bstore.Tx) error {
+	err = c.account.DB.Read(ctx, func(tx store.Tx) error {
 		rcpts := make([]smtp.Path, len(c.recipients))
 		for i, r := range c.recipients {
 			rcpts[i] = r.Addr
@@ -2550,7 +2548,7 @@ func (c *conn) submit(ctx context.Context, recvHdrFor func(string) string, msgWr
 			slog.Int64("msgsize", qml[i].Size))
 	}
 
-	err = c.account.DB.Write(ctx, func(tx *bstore.Tx) error {
+	err = c.account.DB.Write(ctx, func(tx store.Tx) error {
 		for _, rcpt := range c.recipients {
 			outgoing := store.Outgoing{Recipient: rcpt.Addr.XString(true)}
 			if err := tx.Insert(&outgoing); err != nil {
@@ -3269,9 +3267,9 @@ func (c *conn) deliver(ctx context.Context, recvHdrFor func(string) string, msgW
 			// unknownDomain returns whether the sender is domain with which this account has
 			// not had positive interaction.
 			unknownDomain := func() (unknown bool) {
-				err := a0.d.acc.DB.Read(ctx, func(tx *bstore.Tx) (err error) {
+				err := a0.d.acc.DB.Read(ctx, func(tx store.Tx) (err error) {
 					// See if we received a non-junk message from this organizational domain.
-					q := bstore.QueryTx[store.Message](tx)
+					q := store.Query[store.Message](tx)
 					q.FilterNonzero(store.Message{MsgFromOrgDomain: a0.d.m.MsgFromOrgDomain})
 					q.FilterEqual("Expunged", false)
 					q.FilterEqual("Notjunk", true)
@@ -3285,7 +3283,7 @@ func (c *conn) deliver(ctx context.Context, recvHdrFor func(string) string, msgW
 					}
 
 					// See if we sent a message to this organizational domain.
-					qr := bstore.QueryTx[store.Recipient](tx)
+					qr := store.Query[store.Recipient](tx)
 					qr.FilterNonzero(store.Recipient{OrgDomain: a0.d.m.MsgFromOrgDomain})
 					exists, err = qr.Exists()
 					if err != nil {
@@ -3420,7 +3418,7 @@ func (c *conn) deliver(ctx context.Context, recvHdrFor func(string) string, msgW
 						}
 					}()
 
-					err := a.d.acc.DB.Write(context.TODO(), func(tx *bstore.Tx) error {
+					err := a.d.acc.DB.Write(context.TODO(), func(tx store.Tx) error {
 						mbrej, err := a.d.acc.MailboxFind(tx, conf.RejectsMailbox)
 						if err != nil {
 							return fmt.Errorf("finding rejects mailbox: %v", err)

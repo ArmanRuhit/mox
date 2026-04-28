@@ -5,8 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mjl-/bstore"
-
 	"github.com/mjl-/mox/imapclient"
 	"github.com/mjl-/mox/mox-"
 	"github.com/mjl-/mox/store"
@@ -101,7 +99,7 @@ func testCondstoreQresync(t *testing.T, qresync, uidonly bool) {
 	tc.transactf("ok", "Append inbox () \" 1-Jan-2022 10:10:00 +0100\" {1+}\r\nx")
 	tc.transactf("ok", "Append inbox () \" 1-Jan-2022 10:10:00 +0100\" {1+}\r\nx")
 	tc.transactf("ok", "Append inbox () \" 1-Jan-2022 10:10:00 +0100\" {1+}\r\nx")
-	_, err := bstore.QueryDB[store.Message](ctxbg, tc.account.DB).UpdateFields(map[string]any{
+	_, err := store.QueryDB[store.Message](ctxbg, tc.account.DB).UpdateFields(map[string]any{
 		"ModSeq":    0,
 		"CreateSeq": 0,
 	})
@@ -824,7 +822,7 @@ func testQresyncHistory(t *testing.T, uidonly bool) {
 		)...,
 	)
 
-	err := tc.account.DB.Write(ctxbg, func(tx *bstore.Tx) error {
+	err := tc.account.DB.Write(ctxbg, func(tx store.Tx) error {
 		syncState := store.SyncState{ID: 1}
 		err := tx.Get(&syncState)
 		tcheck(t, err, "get syncstate")
@@ -833,7 +831,7 @@ func testQresyncHistory(t *testing.T, uidonly bool) {
 		err = tx.Update(&syncState)
 		tcheck(t, err, "update syncstate")
 
-		q := bstore.QueryTx[store.Message](tx)
+		q := store.Query[store.Message](tx)
 		q.FilterNonzero(store.Message{Expunged: true})
 		q.FilterLessEqual("ModSeq", syncState.HighestDeletedModSeq)
 		n, err := q.Delete()

@@ -62,6 +62,18 @@ possibly making them potentially no longer readable by the previous version.
 
 	ctxbg := context.Background()
 
+	// Detect PostgreSQL mode: if queue/index.db is absent the data directory was
+	// produced by a PG-backed mox. In that case we skip bstore/BoltDB checks (PG
+	// data lives in PostgreSQL and must be verified with pg_dump/psql) but still
+	// validate message files on disk.
+	pgMode := false
+	if _, err := os.Stat(filepath.Join(dataDir, "queue/index.db")); err != nil && os.IsNotExist(err) {
+		if _, err2 := os.Stat(filepath.Join(dataDir, "moxversion")); err2 == nil {
+			pgMode = true
+			log.Printf("info: no queue/index.db found; assuming PostgreSQL-backed data directory. Database content must be verified with pg_dump/psql. Checking message files only.")
+		}
+	}
+
 	// Check whether file exists, or rather, that it doesn't not exist. Other errors
 	// will return true as well, so the triggered check can give the details.
 	exists := func(path string) bool {
@@ -165,22 +177,25 @@ possibly making them potentially no longer readable by the previous version.
 
 	checkQueue := func() {
 		dbpath := filepath.Join(dataDir, "queue/index.db")
-		checkDB(true, dbpath, queue.DBTypes)
 
 		// Check that all messages present in the database also exist on disk.
 		seen := map[string]struct{}{}
-		opts := bstore.Options{MustExist: true, RegisterLogger: c.log.Logger}
-		db, err := bstore.Open(ctxbg, dbpath, &opts, queue.DBTypes...)
-		checkf(err, dbpath, "opening queue database to check messages")
-		if err == nil {
-			err := bstore.QueryDB[queue.Msg](ctxbg, db).ForEach(func(m queue.Msg) error {
-				mp := store.MessagePath(m.ID)
-				seen[mp] = struct{}{}
-				p := filepath.Join(dataDir, "queue", mp)
-				checkFile(dbpath, p, len(m.MsgPrefix), m.Size)
-				return nil
-			})
-			checkf(err, dbpath, "reading messages in queue database to check files")
+		var err error
+		if !pgMode {
+			checkDB(true, dbpath, queue.DBTypes)
+			opts := bstore.Options{MustExist: true, RegisterLogger: c.log.Logger}
+			db, err := bstore.Open(ctxbg, dbpath, &opts, queue.DBTypes...)
+			checkf(err, dbpath, "opening queue database to check messages")
+			if err == nil {
+				err := bstore.QueryDB[queue.Msg](ctxbg, db).ForEach(func(m queue.Msg) error {
+					mp := store.MessagePath(m.ID)
+					seen[mp] = struct{}{}
+					p := filepath.Join(dataDir, "queue", mp)
+					checkFile(dbpath, p, len(m.MsgPrefix), m.Size)
+					return nil
+				})
+				checkf(err, dbpath, "reading messages in queue database to check files")
+			}
 		}
 
 		// Check that there are no files that could be treated as a message.
@@ -232,19 +247,24 @@ possibly making them potentially no longer readable by the previous version.
 	// Check an account, with its database file and messages.
 	checkAccount := func(name string) {
 		accdir := filepath.Join(dataDir, "accounts", name)
-		checkDB(true, filepath.Join(accdir, "index.db"), store.DBTypes)
 
 		jfdbpath := filepath.Join(accdir, "junkfilter.db")
 		jfbloompath := filepath.Join(accdir, "junkfilter.bloom")
-		if exists(jfdbpath) || exists(jfbloompath) {
-			checkDB(true, jfdbpath, junk.DBTypes)
-		}
-		// todo: add some kind of check for the bloom filter?
 
 		// Check that all messages in the database have a message file on disk.
 		// And check consistency of UIDs with the mailbox UIDNext, and check UIDValidity.
 		seen := map[string]struct{}{}
+		var err error
 		dbpath := filepath.Join(accdir, "index.db")
+		if !pgMode {
+			checkDB(true, dbpath, store.DBTypes)
+			if exists(jfdbpath) || exists(jfbloompath) {
+				checkDB(true, jfdbpath, junk.DBTypes)
+			}
+		}
+		// todo: add some kind of check for the bloom filter?
+
+		if !pgMode {
 		opts := bstore.Options{MustExist: true, RegisterLogger: c.log.Logger}
 		db, err := bstore.Open(ctxbg, dbpath, &opts, store.DBTypes...)
 		checkf(err, dbpath, "opening account database to check messages")
@@ -353,6 +373,7 @@ possibly making them potentially no longer readable by the previous version.
 				}
 			}
 		}
+		} // end if !pgMode (bstore account checks)
 
 		// Walk through all files in the msg directory. Warn about files that weren't in
 		// the database as message file. Possibly move away files that could cause trouble.

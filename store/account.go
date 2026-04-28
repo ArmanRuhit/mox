@@ -309,8 +309,8 @@ func (mb *Mailbox) UIDNextAdd(n int) error {
 }
 
 // CalculateCounts calculates the full current counts for messages in the mailbox.
-func (mb *Mailbox) CalculateCounts(tx *bstore.Tx) (mc MailboxCounts, err error) {
-	q := bstore.QueryTx[Message](tx)
+func (mb *Mailbox) CalculateCounts(tx Tx) (mc MailboxCounts, err error) {
+	q := Query[Message](tx)
 	q.FilterNonzero(Message{MailboxID: mb.ID})
 	q.FilterEqual("Expunged", false)
 	err = q.ForEach(func(m Message) error {
@@ -937,7 +937,7 @@ type Account struct {
 	Name   string     // Name, according to configuration.
 	Dir    string     // Directory where account files, including the database, bloom filter, and mail messages, are stored for this account.
 	DBPath string     // Path to database with mailboxes, messages, etc.
-	DB     *bstore.DB // Open database connection.
+	DB     DB // Open database connection.
 
 	// Channel that is closed if/when account has/gets "threads" accounting (see
 	// Upgrade.Threads).
@@ -1044,7 +1044,7 @@ func closeAccount(acc *Account) (rerr error) {
 	}()
 
 	// Verify there are no more pending MessageErase records.
-	l, err := bstore.QueryDB[MessageErase](context.TODO(), acc.DB).List()
+	l, err := QueryDB[MessageErase](context.TODO(), acc.DB).List()
 	if err != nil {
 		return fmt.Errorf("listing messageerase records: %v", err)
 	} else if len(l) > 0 {
@@ -1070,7 +1070,7 @@ func removeAccount(log mlog.Log, accountName string) error {
 	var errs []error
 
 	// Commit removal to database.
-	err := AuthDB.Write(context.Background(), func(tx *bstore.Tx) error {
+	err := AuthDB.Write(context.Background(), func(tx Tx) error {
 		if err := tx.Delete(&AccountRemove{accountName}); err != nil {
 			return fmt.Errorf("deleting account removal request: %v", err)
 		}
@@ -1140,42 +1140,79 @@ func OpenAccountDB(log mlog.Log, accountDir, accountName string) (a *Account, re
 
 	dbpath := filepath.Join(accountDir, "index.db")
 
-	// Create account if it doesn't exist yet.
+	// Detect whether the account is being opened for the first time. For PG
+	// the marker is "no Upgrade row" (initAccount inserts it), checked
+	// after EnsureSchema runs. For bstore it's "index.db is missing".
 	isNew := false
-	if _, err := os.Stat(dbpath); err != nil && os.IsNotExist(err) {
-		isNew = true
-		os.MkdirAll(accountDir, 0770)
-	}
+	var bdb DB
 
-	opts := bstore.Options{Timeout: 5 * time.Second, Perm: 0660, RegisterLogger: moxvar.RegisterLogger(dbpath, log.Logger)}
-	db, err := bstore.Open(context.TODO(), dbpath, &opts, DBTypes...)
-	if err != nil {
-		return nil, err
+	if pgcfg := mox.Conf.Static.PostgreSQL; pgcfg != nil {
+		pool := Pool()
+		if pool == nil {
+			return nil, fmt.Errorf("opening account %q: PG pool not initialised", accountName)
+		}
+		schemaName := "account_" + accountName
+		if err := EnsureSchema(context.TODO(), pool, schemaName, "account"); err != nil {
+			return nil, fmt.Errorf("ensure account schema: %w", err)
+		}
+		bdb = NewPgDB(pool, schemaName)
+		// A fresh schema has no Upgrade rows yet; initAccount inserts
+		// upgradeInit, so its absence is the new-account signal.
+		n, err := QueryDB[Upgrade](context.TODO(), bdb).Count()
+		if err != nil {
+			bdb.Close()
+			return nil, fmt.Errorf("probing pg account schema: %w", err)
+		}
+		isNew = n == 0
+	} else {
+		if _, err := os.Stat(dbpath); err != nil && os.IsNotExist(err) {
+			isNew = true
+			os.MkdirAll(accountDir, 0770)
+		}
+
+		opts := bstore.Options{Timeout: 5 * time.Second, Perm: 0660, RegisterLogger: moxvar.RegisterLogger(dbpath, log.Logger)}
+		db, err := bstore.Open(context.TODO(), dbpath, &opts, DBTypes...)
+		if err != nil {
+			return nil, err
+		}
+
+		// Wraps raw *bstore.DB in the BstoreDB adapter so acc.DB satisfies the store.DB interface — required now that Account.DB is typed as DB not *bstore.DB
+		bdb = NewBstoreDB(db)
 	}
 
 	defer func() {
 		if rerr != nil {
-			err := db.Close()
+			err := bdb.Close()
 			log.Check(err, "closing database file after error")
-			if isNew {
+			if isNew && mox.Conf.Static.PostgreSQL == nil {
 				err := os.Remove(dbpath)
 				log.Check(err, "removing new database file after error")
 			}
+			// PG: leave the schema in place. EnsureSchema is
+			// idempotent, so a retry will skip already-applied
+			// migrations and pick up where we left off.
 		}
 	}()
+
+	// err is reused throughout the rest of the function (Settings/DiskUsage
+	// bootstrap, MessageErase processing, message-id sequence sync). The
+	// branched DB open above no longer declares it at the outer scope.
+	var err error
 
 	acc := &Account{
 		Name:             accountName,
 		Dir:              accountDir,
 		DBPath:           dbpath,
-		DB:               db,
+		// DB:               db,
+		DB:               bdb,
 		nused:            1,
 		closed:           make(chan struct{}),
 		threadsCompleted: make(chan struct{}),
 	}
 
 	if isNew {
-		if err := initAccount(db); err != nil {
+		// if err := initAccount(db); err != nil {
+		if err := initAccount(bdb); err != nil {
 			return nil, fmt.Errorf("initializing account: %v", err)
 		}
 
@@ -1187,8 +1224,8 @@ func OpenAccountDB(log mlog.Log, accountDir, accountName string) (a *Account, re
 	// Process pending MessageErase records. Check that next the message ID assigned by
 	// the database does not already have a file on disk, or increase the sequence so
 	// it doesn't.
-	err = db.Write(context.TODO(), func(tx *bstore.Tx) error {
-		if tx.Get(&Settings{ID: 1}) == bstore.ErrAbsent {
+	err = bdb.Write(context.TODO(), func(tx Tx) error {
+		if tx.Get(&Settings{ID: 1}) == ErrAbsent {
 			if err := tx.Insert(&Settings{ID: 1, ShowAddressSecurity: true}); err != nil {
 				return err
 			}
@@ -1196,9 +1233,9 @@ func OpenAccountDB(log mlog.Log, accountDir, accountName string) (a *Account, re
 
 		du := DiskUsage{ID: 1}
 		err = tx.Get(&du)
-		if err == bstore.ErrAbsent {
+		if err == ErrAbsent {
 			// No DiskUsage record yet, calculate total size and insert.
-			err := bstore.QueryTx[Mailbox](tx).FilterEqual("Expunged", false).ForEach(func(mb Mailbox) error {
+			err := Query[Mailbox](tx).FilterEqual("Expunged", false).ForEach(func(mb Mailbox) error {
 				du.MessageSize += mb.Size
 				return nil
 			})
@@ -1213,7 +1250,7 @@ func OpenAccountDB(log mlog.Log, accountDir, accountName string) (a *Account, re
 		}
 
 		var erase []MessageErase
-		if _, err := bstore.QueryTx[MessageErase](tx).Gather(&erase).Delete(); err != nil {
+		if _, err := Query[MessageErase](tx).Gather(&erase).Delete(); err != nil {
 			return fmt.Errorf("fetching messages to erase: %w", err)
 		}
 		if len(erase) > 0 {
@@ -1255,8 +1292,8 @@ func OpenAccountDB(log mlog.Log, accountDir, accountName string) (a *Account, re
 		// Ensure the message directories don't have a higher message ID than occurs in our
 		// database. If so, increase the next ID used for inserting a message to prevent
 		// clash during delivery.
-		last, err := bstore.QueryTx[Message](tx).SortDesc("ID").Limit(1).Get()
-		if err != nil && err != bstore.ErrAbsent {
+		last, err := Query[Message](tx).SortDesc("ID").Limit(1).Get()
+		if err != nil && err != ErrAbsent {
 			return fmt.Errorf("querying last message: %v", err)
 		}
 
@@ -1302,7 +1339,7 @@ func OpenAccountDB(log mlog.Log, accountDir, accountName string) (a *Account, re
 		if maxFSID > maxDBID {
 			log.Warn("unexpected message file with higher message id than highest id in database, moving database id sequence forward to prevent clashes during future deliveries", slog.Int64("maxdbmsgid", maxDBID), slog.Int64("maxfilemsgid", maxFSID))
 
-			mb, err := bstore.QueryTx[Mailbox](tx).Limit(1).Get()
+			mb, err := Query[Mailbox](tx).Limit(1).Get()
 			if err != nil {
 				return fmt.Errorf("get a mailbox: %v", err)
 			}
@@ -1331,9 +1368,9 @@ func OpenAccountDB(log mlog.Log, accountDir, accountName string) (a *Account, re
 	}
 
 	up := Upgrade{ID: 1}
-	err = db.Write(context.TODO(), func(tx *bstore.Tx) error {
+	err = bdb.Write(context.TODO(), func(tx Tx) error {
 		err := tx.Get(&up)
-		if err == bstore.ErrAbsent {
+		if err == ErrAbsent {
 			if err := tx.Insert(&up); err != nil {
 				return fmt.Errorf("inserting initial upgrade record: %v", err)
 			}
@@ -1349,23 +1386,23 @@ func OpenAccountDB(log mlog.Log, accountDir, accountName string) (a *Account, re
 	// mailbox, and a createseq.
 	if !up.MailboxModSeq {
 		log.Debug("upgrade: adding modseq to each mailbox")
-		err := acc.DB.Write(context.TODO(), func(tx *bstore.Tx) error {
+		err := acc.DB.Write(context.TODO(), func(tx Tx) error {
 			var modseq ModSeq
 
-			mbl, err := bstore.QueryTx[Mailbox](tx).FilterEqual("Expunged", false).List()
+			mbl, err := Query[Mailbox](tx).FilterEqual("Expunged", false).List()
 			if err != nil {
 				return fmt.Errorf("listing mailboxes: %v", err)
 			}
 			for _, mb := range mbl {
 				// Get current highest modseq of message in account.
-				qms := bstore.QueryTx[Message](tx)
+				qms := Query[Message](tx)
 				qms.FilterNonzero(Message{MailboxID: mb.ID})
 				qms.SortDesc("ModSeq")
 				qms.Limit(1)
 				m, err := qms.Get()
 				if err == nil {
 					mb.ModSeq = ModSeq(m.ModSeq.Client())
-				} else if err == bstore.ErrAbsent {
+				} else if err == ErrAbsent {
 					if modseq == 0 {
 						modseq, err = acc.NextModSeq(tx)
 						if err != nil {
@@ -1398,8 +1435,8 @@ func OpenAccountDB(log mlog.Log, accountDir, accountName string) (a *Account, re
 	if !up.MailboxParentID {
 		log.Debug("upgrade: setting parentid on each mailbox")
 
-		err := acc.DB.Write(context.TODO(), func(tx *bstore.Tx) error {
-			mbl, err := bstore.QueryTx[Mailbox](tx).FilterEqual("Expunged", false).SortAsc("Name").List()
+		err := acc.DB.Write(context.TODO(), func(tx Tx) error {
+			mbl, err := Query[Mailbox](tx).FilterEqual("Expunged", false).SortAsc("Name").List()
 			if err != nil {
 				return fmt.Errorf("listing mailboxes: %w", err)
 			}
@@ -1482,8 +1519,8 @@ func OpenAccountDB(log mlog.Log, accountDir, accountName string) (a *Account, re
 	if !up.MailboxCounts {
 		log.Debug("upgrade: ensuring all mailboxes have message counts")
 
-		err := acc.DB.Write(context.TODO(), func(tx *bstore.Tx) error {
-			err := bstore.QueryTx[Mailbox](tx).FilterEqual("HaveCounts", false).ForEach(func(mb Mailbox) error {
+		err := acc.DB.Write(context.TODO(), func(tx Tx) error {
+			err := Query[Mailbox](tx).FilterEqual("HaveCounts", false).ForEach(func(mb Mailbox) error {
 				mc, err := mb.CalculateCounts(tx)
 				if err != nil {
 					return err
@@ -1629,8 +1666,9 @@ func (a *Account) ThreadingWait(log mlog.Log) error {
 	return a.threadsErr
 }
 
-func initAccount(db *bstore.DB) error {
-	return db.Write(context.TODO(), func(tx *bstore.Tx) error {
+// func initAccount(db *bstore.DB) error {
+func initAccount(db DB) error {
+	return db.Write(context.TODO(), func(tx Tx) error {
 		uidvalidity := InitialUIDValidity()
 
 		if err := tx.Insert(&upgradeInit); err != nil {
@@ -1822,7 +1860,7 @@ func (a *Account) CheckConsistency() error {
 	ctx := context.Background()
 	log := mlog.New("store", nil)
 
-	err := a.DB.Read(ctx, func(tx *bstore.Tx) error {
+	err := a.DB.Read(ctx, func(tx Tx) error {
 		nuv := NextUIDValidity{ID: 1}
 		err := tx.Get(&nuv)
 		if err != nil {
@@ -1831,7 +1869,7 @@ func (a *Account) CheckConsistency() error {
 
 		mailboxes := map[int64]Mailbox{}     // Also expunged mailboxes.
 		mailboxNames := map[string]Mailbox{} // Only live names.
-		err = bstore.QueryTx[Mailbox](tx).ForEach(func(mb Mailbox) error {
+		err = Query[Mailbox](tx).ForEach(func(mb Mailbox) error {
 			mailboxes[mb.ID] = mb
 			if !mb.Expunged {
 				if xmb, ok := mailboxNames[mb.Name]; ok {
@@ -1851,8 +1889,8 @@ func (a *Account) CheckConsistency() error {
 				errmsgs = append(errmsgs, errmsg)
 				return nil
 			}
-			m, err := bstore.QueryTx[Message](tx).FilterNonzero(Message{MailboxID: mb.ID}).SortDesc("ModSeq").Limit(1).Get()
-			if err == bstore.ErrAbsent {
+			m, err := Query[Message](tx).FilterNonzero(Message{MailboxID: mb.ID}).SortDesc("ModSeq").Limit(1).Get()
+			if err == ErrAbsent {
 				return nil
 			} else if err != nil {
 				return fmt.Errorf("get message with highest modseq for mailbox: %v", err)
@@ -1888,7 +1926,7 @@ func (a *Account) CheckConsistency() error {
 			key       string
 		}
 		annotations := map[annotation]struct{}{}
-		err = bstore.QueryTx[Annotation](tx).ForEach(func(a Annotation) error {
+		err = Query[Annotation](tx).ForEach(func(a Annotation) error {
 			if !a.Expunged {
 				k := annotation{a.MailboxID, a.Key}
 				if _, ok := annotations[k]; ok {
@@ -1942,7 +1980,7 @@ func (a *Account) CheckConsistency() error {
 		var ntrained int
 
 		// Get IDs of erase messages not yet removed, they'll have a message file.
-		err = bstore.QueryTx[MessageErase](tx).ForEach(func(me MessageErase) error {
+		err = Query[MessageErase](tx).ForEach(func(me MessageErase) error {
 			eraseMessageIDs[me.ID] = me.SkipUpdateDiskUsage
 			return nil
 		})
@@ -1952,7 +1990,7 @@ func (a *Account) CheckConsistency() error {
 
 		counts := map[int64]MailboxCounts{}
 		var totalExpungedSize int64
-		err = bstore.QueryTx[Message](tx).ForEach(func(m Message) error {
+		err = Query[Message](tx).ForEach(func(m Message) error {
 			mc := counts[m.MailboxID]
 			mc.Add(m.MailboxCounts())
 			counts[m.MailboxID] = mc
@@ -1995,7 +2033,7 @@ func (a *Account) CheckConsistency() error {
 			}
 			for i, pid := range m.ThreadParentIDs {
 				am := Message{ID: pid}
-				if err := tx.Get(&am); err == bstore.ErrAbsent || err == nil && am.Expunged {
+				if err := tx.Get(&am); err == ErrAbsent || err == nil && am.Expunged {
 					continue
 				} else if err != nil {
 					return fmt.Errorf("get ancestor message: %v", err)
@@ -2133,7 +2171,7 @@ func (a *Account) Conf() (config.Account, bool) {
 }
 
 // NextUIDValidity returns the next new/unique uidvalidity to use for this account.
-func (a *Account) NextUIDValidity(tx *bstore.Tx) (uint32, error) {
+func (a *Account) NextUIDValidity(tx Tx) (uint32, error) {
 	nuv := NextUIDValidity{ID: 1}
 	if err := tx.Get(&nuv); err != nil {
 		return 0, err
@@ -2148,13 +2186,13 @@ func (a *Account) NextUIDValidity(tx *bstore.Tx) (uint32, error) {
 
 // NextModSeq returns the next modification sequence, which is global per account,
 // over all types.
-func (a *Account) NextModSeq(tx *bstore.Tx) (ModSeq, error) {
+func (a *Account) NextModSeq(tx Tx) (ModSeq, error) {
 	return nextModSeq(tx)
 }
 
-func nextModSeq(tx *bstore.Tx) (ModSeq, error) {
+func nextModSeq(tx Tx) (ModSeq, error) {
 	v := SyncState{ID: 1}
-	if err := tx.Get(&v); err == bstore.ErrAbsent {
+	if err := tx.Get(&v); err == ErrAbsent {
 		// We start assigning from modseq 2. Modseq 0 is not usable, so returned as 1, so
 		// already used.
 		// HighestDeletedModSeq is -1 so comparison against the default ModSeq zero value
@@ -2168,10 +2206,10 @@ func nextModSeq(tx *bstore.Tx) (ModSeq, error) {
 	return v.LastModSeq, tx.Update(&v)
 }
 
-func (a *Account) HighestDeletedModSeq(tx *bstore.Tx) (ModSeq, error) {
+func (a *Account) HighestDeletedModSeq(tx Tx) (ModSeq, error) {
 	v := SyncState{ID: 1}
 	err := tx.Get(&v)
-	if err == bstore.ErrAbsent {
+	if err == ErrAbsent {
 		return 0, nil
 	}
 	return v.HighestDeletedModSeq, err
@@ -2262,7 +2300,7 @@ type AddOpts struct {
 //
 // Caller must save the mailbox after MessageAdd returns, and broadcast changes for
 // new the message, updated mailbox counts and possibly new mailbox keywords.
-func (a *Account) MessageAdd(log mlog.Log, tx *bstore.Tx, mb *Mailbox, m *Message, msgFile *os.File, opts AddOpts) (rerr error) {
+func (a *Account) MessageAdd(log mlog.Log, tx Tx, mb *Mailbox, m *Message, msgFile *os.File, opts AddOpts) (rerr error) {
 	if m.Expunged {
 		return fmt.Errorf("cannot deliver expunged message")
 	}
@@ -2540,8 +2578,8 @@ func (a *Account) SetPassword(log mlog.Log, password string) error {
 		return fmt.Errorf("generating password hash: %w", err)
 	}
 
-	err = a.DB.Write(context.TODO(), func(tx *bstore.Tx) error {
-		if _, err := bstore.QueryTx[Password](tx).Delete(); err != nil {
+	err = a.DB.Write(context.TODO(), func(tx Tx) error {
+		if _, err := Query[Password](tx).Delete(); err != nil {
 			return fmt.Errorf("deleting existing password: %v", err)
 		}
 		var pw Password
@@ -2600,7 +2638,7 @@ func (a *Account) SetPassword(log mlog.Log, password string) error {
 
 // SessionsClear invalidates all (web) login sessions for the account.
 func (a *Account) SessionsClear(ctx context.Context, log mlog.Log) error {
-	return a.DB.Write(ctx, func(tx *bstore.Tx) error {
+	return a.DB.Write(ctx, func(tx Tx) error {
 		return sessionRemoveAll(ctx, log, tx, a.Name)
 	})
 }
@@ -2608,14 +2646,14 @@ func (a *Account) SessionsClear(ctx context.Context, log mlog.Log) error {
 // Subjectpass returns the signing key for use with subjectpass for the given
 // email address with canonical localpart.
 func (a *Account) Subjectpass(email string) (key string, err error) {
-	return key, a.DB.Write(context.TODO(), func(tx *bstore.Tx) error {
+	return key, a.DB.Write(context.TODO(), func(tx Tx) error {
 		v := Subjectpass{Email: email}
 		err := tx.Get(&v)
 		if err == nil {
 			key = v.Key
 			return nil
 		}
-		if !errors.Is(err, bstore.ErrAbsent) {
+		if !errors.Is(err, ErrAbsent) {
 			return fmt.Errorf("get subjectpass key from accounts database: %w", err)
 		}
 		key = ""
@@ -2644,7 +2682,7 @@ func (a *Account) Subjectpass(email string) (key string, err error) {
 //
 // Caller must hold account wlock.
 // Caller must propagate changes if any.
-func (a *Account) MailboxEnsure(tx *bstore.Tx, name string, subscribe bool, specialUse SpecialUse, modseq *ModSeq) (mb Mailbox, changes []Change, rerr error) {
+func (a *Account) MailboxEnsure(tx Tx, name string, subscribe bool, specialUse SpecialUse, modseq *ModSeq) (mb Mailbox, changes []Change, rerr error) {
 	if norm.NFC.String(name) != name {
 		return Mailbox{}, nil, fmt.Errorf("mailbox name not normalized")
 	}
@@ -2656,7 +2694,7 @@ func (a *Account) MailboxEnsure(tx *bstore.Tx, name string, subscribe bool, spec
 
 	// Get mailboxes with same name or prefix (parents).
 	elems := strings.Split(name, "/")
-	q := bstore.QueryTx[Mailbox](tx)
+	q := Query[Mailbox](tx)
 	q.FilterEqual("Expunged", false)
 	q.FilterFn(func(xmb Mailbox) bool {
 		t := strings.Split(xmb.Name, "/")
@@ -2721,7 +2759,7 @@ func (a *Account) MailboxEnsure(tx *bstore.Tx, name string, subscribe bool, spec
 			flags = []string{`\Subscribed`}
 		} else if err := tx.Get(&Subscription{p}); err == nil {
 			flags = []string{`\Subscribed`}
-		} else if err != bstore.ErrAbsent {
+		} else if err != ErrAbsent {
 			return Mailbox{}, nil, fmt.Errorf("looking up subscription for %q: %v", p, err)
 		}
 
@@ -2736,12 +2774,12 @@ func (a *Account) MailboxEnsure(tx *bstore.Tx, name string, subscribe bool, spec
 			if !b || qerr != nil {
 				return
 			}
-			qs := bstore.QueryTx[Mailbox](tx)
+			qs := Query[Mailbox](tx)
 			qs.FilterFn(func(xmb Mailbox) bool {
 				return *fn(&xmb)
 			})
 			xmb, err := qs.Get()
-			if err == bstore.ErrAbsent {
+			if err == ErrAbsent {
 				return
 			} else if err != nil {
 				qerr = fmt.Errorf("looking up mailbox with special-use flag: %v", err)
@@ -2777,20 +2815,20 @@ func (a *Account) MailboxEnsure(tx *bstore.Tx, name string, subscribe bool, spec
 
 // MailboxExists checks if mailbox exists.
 // Caller must hold account rlock.
-func (a *Account) MailboxExists(tx *bstore.Tx, name string) (bool, error) {
-	q := bstore.QueryTx[Mailbox](tx)
+func (a *Account) MailboxExists(tx Tx, name string) (bool, error) {
+	q := Query[Mailbox](tx)
 	q.FilterEqual("Expunged", false)
 	q.FilterEqual("Name", name)
 	return q.Exists()
 }
 
 // MailboxFind finds a mailbox by name, returning a nil mailbox and nil error if mailbox does not exist.
-func (a *Account) MailboxFind(tx *bstore.Tx, name string) (*Mailbox, error) {
-	q := bstore.QueryTx[Mailbox](tx)
+func (a *Account) MailboxFind(tx Tx, name string) (*Mailbox, error) {
+	q := Query[Mailbox](tx)
 	q.FilterEqual("Expunged", false)
 	q.FilterEqual("Name", name)
 	mb, err := q.Get()
-	if err == bstore.ErrAbsent {
+	if err == ErrAbsent {
 		return nil, nil
 	}
 	if err != nil {
@@ -2802,7 +2840,7 @@ func (a *Account) MailboxFind(tx *bstore.Tx, name string) (*Mailbox, error) {
 // SubscriptionEnsure ensures a subscription for name exists. The mailbox does not
 // have to exist. Any parents are not automatically subscribed.
 // Changes are returned and must be broadcasted by the caller.
-func (a *Account) SubscriptionEnsure(tx *bstore.Tx, name string) ([]Change, error) {
+func (a *Account) SubscriptionEnsure(tx Tx, name string) ([]Change, error) {
 	if err := tx.Get(&Subscription{name}); err == nil {
 		return nil, nil
 	}
@@ -2811,13 +2849,13 @@ func (a *Account) SubscriptionEnsure(tx *bstore.Tx, name string) ([]Change, erro
 		return nil, fmt.Errorf("inserting subscription: %w", err)
 	}
 
-	q := bstore.QueryTx[Mailbox](tx)
+	q := Query[Mailbox](tx)
 	q.FilterEqual("Expunged", false)
 	q.FilterEqual("Name", name)
 	_, err := q.Get()
 	if err == nil {
 		return []Change{ChangeAddSubscription{name, nil}}, nil
-	} else if err != bstore.ErrAbsent {
+	} else if err != ErrAbsent {
 		return nil, fmt.Errorf("looking up mailbox for subscription: %w", err)
 	}
 	return []Change{ChangeAddSubscription{name, []string{`\NonExistent`}}}, nil
@@ -2953,7 +2991,7 @@ func (a *Account) DeliverMailbox(log mlog.Log, mailbox string, m *Message, msgFi
 		}
 	}()
 
-	err := a.DB.Write(context.TODO(), func(tx *bstore.Tx) error {
+	err := a.DB.Write(context.TODO(), func(tx Tx) error {
 		mb, chl, err := a.MailboxEnsure(tx, mailbox, true, SpecialUse{}, &m.ModSeq)
 		if err != nil {
 			return fmt.Errorf("ensuring mailbox: %w", err)
@@ -3009,7 +3047,7 @@ type RemoveOpts struct {
 // Caller must broadcast changes.
 //
 // Must be called with wlock held.
-func (a *Account) MessageRemove(log mlog.Log, tx *bstore.Tx, modseq ModSeq, mb *Mailbox, opts RemoveOpts, l ...Message) (chremuids ChangeRemoveUIDs, chmbc ChangeMailboxCounts, rerr error) {
+func (a *Account) MessageRemove(log mlog.Log, tx Tx, modseq ModSeq, mb *Mailbox, opts RemoveOpts, l ...Message) (chremuids ChangeRemoveUIDs, chmbc ChangeMailboxCounts, rerr error) {
 	if len(l) == 0 {
 		return ChangeRemoveUIDs{}, ChangeMailboxCounts{}, fmt.Errorf("must expunge at least one message")
 	}
@@ -3021,7 +3059,7 @@ func (a *Account) MessageRemove(log mlog.Log, tx *bstore.Tx, modseq ModSeq, mb *
 	for i, m := range l {
 		anyIDs[i] = m.ID
 	}
-	qmr := bstore.QueryTx[Recipient](tx)
+	qmr := Query[Recipient](tx)
 	qmr.FilterEqual("MessageID", anyIDs...)
 	if _, err := qmr.Delete(); err != nil {
 		return ChangeRemoveUIDs{}, ChangeMailboxCounts{}, fmt.Errorf("deleting message recipients for messages: %w", err)
@@ -3090,10 +3128,10 @@ func (a *Account) MessageRemove(log mlog.Log, tx *bstore.Tx, modseq ModSeq, mb *
 //
 // Caller most hold account wlock.
 // Caller must broadcast changes.
-func (a *Account) TidyRejectsMailbox(log mlog.Log, tx *bstore.Tx, mbRej *Mailbox) (changes []Change, hasSpace bool, rerr error) {
+func (a *Account) TidyRejectsMailbox(log mlog.Log, tx Tx, mbRej *Mailbox) (changes []Change, hasSpace bool, rerr error) {
 	// Gather old messages to expunge.
 	old := time.Now().Add(-14 * 24 * time.Hour)
-	qdel := bstore.QueryTx[Message](tx)
+	qdel := Query[Message](tx)
 	qdel.FilterNonzero(Message{MailboxID: mbRej.ID})
 	qdel.FilterEqual("Expunged", false)
 	qdel.FilterLess("Received", old)
@@ -3120,7 +3158,7 @@ func (a *Account) TidyRejectsMailbox(log mlog.Log, tx *bstore.Tx, mbRej *Mailbox
 	}
 
 	// We allow up to n messages.
-	qcount := bstore.QueryTx[Message](tx)
+	qcount := Query[Message](tx)
 	qcount.FilterNonzero(Message{MailboxID: mbRej.ID})
 	qcount.FilterEqual("Expunged", false)
 	qcount.Limit(1000)
@@ -3140,7 +3178,7 @@ func (a *Account) TidyRejectsMailbox(log mlog.Log, tx *bstore.Tx, mbRej *Mailbox
 func (a *Account) RejectsRemove(log mlog.Log, rejectsMailbox, messageID string) error {
 	var changes []Change
 
-	err := a.DB.Write(context.TODO(), func(tx *bstore.Tx) error {
+	err := a.DB.Write(context.TODO(), func(tx Tx) error {
 		mb, err := a.MailboxFind(tx, rejectsMailbox)
 		if err != nil {
 			return fmt.Errorf("finding mailbox: %w", err)
@@ -3149,7 +3187,7 @@ func (a *Account) RejectsRemove(log mlog.Log, rejectsMailbox, messageID string) 
 			return nil
 		}
 
-		q := bstore.QueryTx[Message](tx)
+		q := Query[Message](tx)
 		q.FilterNonzero(Message{MailboxID: mb.ID, MessageID: messageID})
 		q.FilterEqual("Expunged", false)
 		expunge, err := q.List()
@@ -3188,7 +3226,7 @@ func (a *Account) RejectsRemove(log mlog.Log, rejectsMailbox, messageID string) 
 }
 
 // AddMessageSize adjusts the DiskUsage.MessageSize by size.
-func (a *Account) AddMessageSize(log mlog.Log, tx *bstore.Tx, size int64) error {
+func (a *Account) AddMessageSize(log mlog.Log, tx Tx, size int64) error {
 	du := DiskUsage{ID: 1}
 	if err := tx.Get(&du); err != nil {
 		return fmt.Errorf("get diskusage: %v", err)
@@ -3219,7 +3257,7 @@ func (a *Account) QuotaMessageSize() int64 {
 
 // CanAddMessageSize checks if a message of size bytes can be added, depending on
 // total message size and configured quota for account.
-func (a *Account) CanAddMessageSize(tx *bstore.Tx, size int64) (ok bool, maxSize int64, err error) {
+func (a *Account) CanAddMessageSize(tx Tx, size int64) (ok bool, maxSize int64, err error) {
 	maxSize = a.QuotaMessageSize()
 	if maxSize <= 0 {
 		return true, 0, nil
@@ -3284,9 +3322,9 @@ func OpenEmailAuth(log mlog.Log, email string, password string, checkLoginDisabl
 		return nil, "", ErrUnknownCredentials
 	}
 
-	pw, err := bstore.QueryDB[Password](context.TODO(), acc.DB).Get()
+	pw, err := QueryDB[Password](context.TODO(), acc.DB).Get()
 	if err != nil {
-		if err == bstore.ErrAbsent {
+		if err == ErrAbsent {
 			return nil, "", ErrUnknownCredentials
 		}
 		return nil, "", fmt.Errorf("looking up password: %v", err)
@@ -3554,7 +3592,7 @@ func CheckKeyword(kw string) error {
 // To limit damage to the internet and our reputation in case of account
 // compromise, we limit the max number of messages sent in a 24 hour window, both
 // total number of messages and number of first-time recipients.
-func (a *Account) SendLimitReached(tx *bstore.Tx, recipients []smtp.Path) (msglimit, rcptlimit int, rerr error) {
+func (a *Account) SendLimitReached(tx Tx, recipients []smtp.Path) (msglimit, rcptlimit int, rerr error) {
 	conf, _ := a.Conf()
 	msgmax := conf.MaxOutgoingMessagesPerDay
 	if msgmax == 0 {
@@ -3570,7 +3608,7 @@ func (a *Account) SendLimitReached(tx *bstore.Tx, recipients []smtp.Path) (msgli
 
 	rcpts := map[string]time.Time{}
 	n := 0
-	err := bstore.QueryTx[Outgoing](tx).FilterGreater("Submitted", time.Now().Add(-24*time.Hour)).ForEach(func(o Outgoing) error {
+	err := Query[Outgoing](tx).FilterGreater("Submitted", time.Now().Add(-24*time.Hour)).ForEach(func(o Outgoing) error {
 		n++
 		if rcpts[o.Recipient].IsZero() || o.Submitted.Before(rcpts[o.Recipient]) {
 			rcpts[o.Recipient] = o.Submitted
@@ -3591,7 +3629,7 @@ func (a *Account) SendLimitReached(tx *bstore.Tx, recipients []smtp.Path) (msgli
 	}
 
 	isFirstTime := func(rcpt string, before time.Time) (bool, error) {
-		exists, err := bstore.QueryTx[Outgoing](tx).FilterNonzero(Outgoing{Recipient: rcpt}).FilterLess("Submitted", before).Exists()
+		exists, err := Query[Outgoing](tx).FilterNonzero(Outgoing{Recipient: rcpt}).FilterLess("Submitted", before).Exists()
 		return !exists, err
 	}
 
@@ -3621,9 +3659,9 @@ var ErrMailboxExpunged = errors.New("mailbox was deleted")
 
 // MailboxID gets a mailbox by ID.
 //
-// Returns bstore.ErrAbsent if the mailbox does not exist.
+// Returns ErrAbsent if the mailbox does not exist.
 // Returns ErrMailboxExpunged if the mailbox is expunged.
-func MailboxID(tx *bstore.Tx, id int64) (Mailbox, error) {
+func MailboxID(tx Tx, id int64) (Mailbox, error) {
 	mb := Mailbox{ID: id}
 	err := tx.Get(&mb)
 	if err == nil && mb.Expunged {
@@ -3640,7 +3678,7 @@ func MailboxID(tx *bstore.Tx, id int64) (Mailbox, error) {
 // other mailboxes if they have them, reflected in the returned changes.
 //
 // Name must be in normalized form, see CheckMailboxName.
-func (a *Account) MailboxCreate(tx *bstore.Tx, name string, specialUse SpecialUse) (nmb Mailbox, changes []Change, created []string, exists bool, rerr error) {
+func (a *Account) MailboxCreate(tx Tx, name string, specialUse SpecialUse) (nmb Mailbox, changes []Change, created []string, exists bool, rerr error) {
 	elems := strings.Split(name, "/")
 	var p string
 	var modseq ModSeq
@@ -3674,7 +3712,7 @@ func (a *Account) MailboxCreate(tx *bstore.Tx, name string, specialUse SpecialUs
 // adds missing parents for dst.
 //
 // Name must be in normalized form, see CheckMailboxName, and cannot be Inbox.
-func (a *Account) MailboxRename(tx *bstore.Tx, mbsrc *Mailbox, dst string, modseq *ModSeq) (changes []Change, isInbox, alreadyExists bool, rerr error) {
+func (a *Account) MailboxRename(tx Tx, mbsrc *Mailbox, dst string, modseq *ModSeq) (changes []Change, isInbox, alreadyExists bool, rerr error) {
 	if mbsrc.Name == "Inbox" || dst == "Inbox" {
 		return nil, true, false, fmt.Errorf("inbox cannot be renamed")
 	}
@@ -3698,7 +3736,7 @@ func (a *Account) MailboxRename(tx *bstore.Tx, mbsrc *Mailbox, dst string, modse
 
 	// Move children to their new name.
 	srcPrefix := mbsrc.Name + "/"
-	q := bstore.QueryTx[Mailbox](tx)
+	q := Query[Mailbox](tx)
 	q.FilterEqual("Expunged", false)
 	q.FilterFn(func(mb Mailbox) bool {
 		return strings.HasPrefix(mb.Name, srcPrefix)
@@ -3715,7 +3753,7 @@ func (a *Account) MailboxRename(tx *bstore.Tx, mbsrc *Mailbox, dst string, modse
 		var flags []string
 		if err := tx.Get(&Subscription{nname}); err == nil {
 			flags = []string{`\Subscribed`}
-		} else if err != bstore.ErrAbsent {
+		} else if err != ErrAbsent {
 			return nil, false, false, fmt.Errorf("look up subscription for new name of child %q: %v", nname, err)
 		}
 		// Leaf is first.
@@ -3732,7 +3770,7 @@ func (a *Account) MailboxRename(tx *bstore.Tx, mbsrc *Mailbox, dst string, modse
 	var flags []string
 	if err := tx.Get(&Subscription{dst}); err == nil {
 		flags = []string{`\Subscribed`}
-	} else if err != bstore.ErrAbsent {
+	} else if err != ErrAbsent {
 		return nil, false, false, fmt.Errorf("look up subscription for new name %q: %v", dst, err)
 	}
 	changes = append(changes, ChangeRenameMailbox{mbsrc.ID, mbsrc.Name, dst, flags, *modseq})
@@ -3750,14 +3788,14 @@ func (a *Account) MailboxRename(tx *bstore.Tx, mbsrc *Mailbox, dst string, modse
 	var parentChanges []Change
 	for i := range t {
 		s := strings.Join(t[:i+1], "/")
-		q := bstore.QueryTx[Mailbox](tx)
+		q := Query[Mailbox](tx)
 		q.FilterEqual("Expunged", false)
 		q.FilterNonzero(Mailbox{Name: s})
 		pmb, err := q.Get()
 		if err == nil {
 			parent = pmb
 			continue
-		} else if err != bstore.ErrAbsent {
+		} else if err != ErrAbsent {
 			return nil, false, false, fmt.Errorf("lookup destination parent mailbox %q: %v", s, err)
 		}
 
@@ -3781,7 +3819,7 @@ func (a *Account) MailboxRename(tx *bstore.Tx, mbsrc *Mailbox, dst string, modse
 		var flags []string
 		if err := tx.Get(&Subscription{parent.Name}); err == nil {
 			flags = []string{`\Subscribed`}
-		} else if err != bstore.ErrAbsent {
+		} else if err != ErrAbsent {
 			return nil, false, false, fmt.Errorf("look up subscription for new parent %q: %v", parent.Name, err)
 		}
 		parentChanges = append(parentChanges, ChangeAddMailbox{parent, flags})
@@ -3807,10 +3845,10 @@ func (a *Account) MailboxRename(tx *bstore.Tx, mbsrc *Mailbox, dst string, modse
 //
 // Caller should broadcast the changes (deleting all messages in the mailbox and
 // deleting the mailbox itself).
-func (a *Account) MailboxDelete(ctx context.Context, log mlog.Log, tx *bstore.Tx, mb *Mailbox) (changes []Change, hasChildren bool, rerr error) {
+func (a *Account) MailboxDelete(ctx context.Context, log mlog.Log, tx Tx, mb *Mailbox) (changes []Change, hasChildren bool, rerr error) {
 	// Look for existence of child mailboxes. There is a lot of text in the IMAP RFCs about
 	// NoInferior and NoSelect. We just require only leaf mailboxes are deleted.
-	qmb := bstore.QueryTx[Mailbox](tx)
+	qmb := Query[Mailbox](tx)
 	qmb.FilterEqual("Expunged", false)
 	mbprefix := mb.Name + "/"
 	qmb.FilterFn(func(xmb Mailbox) bool {
@@ -3827,7 +3865,7 @@ func (a *Account) MailboxDelete(ctx context.Context, log mlog.Log, tx *bstore.Tx
 		return nil, false, fmt.Errorf("get next modseq: %v", err)
 	}
 
-	qm := bstore.QueryTx[Message](tx)
+	qm := Query[Message](tx)
 	qm.FilterNonzero(Message{MailboxID: mb.ID})
 	qm.FilterEqual("Expunged", false)
 	qm.SortAsc("UID")
@@ -3845,7 +3883,7 @@ func (a *Account) MailboxDelete(ctx context.Context, log mlog.Log, tx *bstore.Tx
 	}
 
 	// Marking metadata annotations deleted. ../rfc/5464:373
-	qa := bstore.QueryTx[Annotation](tx)
+	qa := Query[Annotation](tx)
 	qa.FilterNonzero(Annotation{MailboxID: mb.ID})
 	qa.FilterEqual("Expunged", false)
 	if _, err := qa.UpdateFields(map[string]any{"ModSeq": modseq, "Expunged": true, "IsString": false, "Value": []byte(nil)}); err != nil {

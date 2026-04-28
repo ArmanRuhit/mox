@@ -79,11 +79,12 @@ during those commands instead of during "data".
 		userConfDir = "$userconfigdir"
 	}
 
-	var dir, ip string
+	var dir, ip, pgDSN string
 	var initOnly bool
 	c.flag.StringVar(&dir, "dir", filepath.Join(userConfDir, "mox-localserve"), "configuration storage directory")
 	c.flag.StringVar(&ip, "ip", "", "serve on this ip instead of default 127.0.0.1 and ::1. only used when writing configuration, at first launch.")
 	c.flag.BoolVar(&initOnly, "initonly", false, "write configuration files and exit")
+	c.flag.StringVar(&pgDSN, "pg", "", "PostgreSQL DSN (e.g. postgres://user:pass@localhost/mox?sslmode=disable). Overrides any PostgreSQL setting in the config file.")
 	args := c.Parse()
 	if len(args) != 0 {
 		c.Usage()
@@ -119,6 +120,10 @@ during those commands instead of during "data".
 		log.Fatal("can only use -ip when writing a new config file")
 	} else {
 		existingConfig = true
+	}
+
+	if pgDSN != "" {
+		mox.Conf.Static.PostgreSQL = &config.PostgreSQLConfig{DSN: pgDSN}
 	}
 
 	// For new configs, we keep the "info" loglevel set by writeLocalConfig until after

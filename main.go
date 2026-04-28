@@ -43,7 +43,6 @@ import (
 	"github.com/mjl-/adns"
 
 	"github.com/mjl-/autocert"
-	"github.com/mjl-/bstore"
 	"github.com/mjl-/sconf"
 	"github.com/mjl-/sherpa"
 
@@ -139,6 +138,7 @@ var commands = []struct {
 	{"localserve", cmdLocalserve},
 	{"help", cmdHelp},
 	{"backup", cmdBackup},
+	{"pg migrate", cmdPgMigrate},
 	{"verifydata", cmdVerifydata},
 	{"licenses", cmdLicenses},
 
@@ -3586,13 +3586,13 @@ open, or is not running.
 		}
 	}()
 
-	err = a.DB.Write(context.Background(), func(tx *bstore.Tx) error {
+	err = a.DB.Write(context.Background(), func(tx store.Tx) error {
 		uidvalidity, err := a.NextUIDValidity(tx)
 		if err != nil {
 			return fmt.Errorf("assigning next uid validity: %v", err)
 		}
 
-		q := bstore.QueryTx[store.Mailbox](tx)
+		q := store.Query[store.Mailbox](tx)
 		q.FilterEqual("Expunged", false)
 		if len(args) == 2 {
 			q.FilterEqual("Name", args[1])
@@ -3648,7 +3648,7 @@ open, or is not running.
 	// Gather the last-assigned UIDs per mailbox.
 	uidlasts := map[int64]store.UID{}
 
-	err = a.DB.Write(context.Background(), func(tx *bstore.Tx) error {
+	err = a.DB.Write(context.Background(), func(tx store.Tx) error {
 		// Reassign UIDs, going per mailbox. We assign starting at 1, only changing the
 		// message if it isn't already at the intended UID. Doing it in this order ensures
 		// we don't get into trouble with duplicate UIDs for a mailbox. We assign a new
@@ -3657,7 +3657,7 @@ open, or is not running.
 		modseq, err := a.NextModSeq(tx)
 		xcheckf(err, "assigning next modseq")
 
-		q := bstore.QueryTx[store.Message](tx)
+		q := store.Query[store.Message](tx)
 		if len(args) == 2 {
 			q.FilterNonzero(store.Message{MailboxID: mailboxID})
 		}
@@ -3679,7 +3679,7 @@ open, or is not running.
 		}
 
 		// Now update the uidnext, uidvalidity and modseq for each mailbox.
-		err = bstore.QueryTx[store.Mailbox](tx).FilterEqual("Expunged", false).ForEach(func(mb store.Mailbox) error {
+		err = store.Query[store.Mailbox](tx).FilterEqual("Expunged", false).ForEach(func(mb store.Mailbox) error {
 			// Assign each mailbox a completely new uidvalidity.
 			uidvalidity, err := a.NextUIDValidity(tx)
 			if err != nil {
@@ -3743,15 +3743,15 @@ open, or is not running.
 
 	var maxUIDValidity uint32
 
-	err = a.DB.Write(context.Background(), func(tx *bstore.Tx) error {
+	err = a.DB.Write(context.Background(), func(tx store.Tx) error {
 		// We look at each mailbox, retrieve its max UID and compare against the mailbox
 		// UIDNEXT.
-		err := bstore.QueryTx[store.Mailbox](tx).FilterEqual("Expunged", false).ForEach(func(mb store.Mailbox) error {
+		err := store.Query[store.Mailbox](tx).FilterEqual("Expunged", false).ForEach(func(mb store.Mailbox) error {
 			if mb.UIDValidity > maxUIDValidity {
 				maxUIDValidity = mb.UIDValidity
 			}
-			m, err := bstore.QueryTx[store.Message](tx).FilterNonzero(store.Message{MailboxID: mb.ID}).SortDesc("UID").Limit(1).Get()
-			if err == bstore.ErrAbsent || err == nil && m.UID < mb.UIDNext {
+			m, err := store.Query[store.Message](tx).FilterNonzero(store.Message{MailboxID: mb.ID}).SortDesc("UID").Limit(1).Get()
+			if errors.Is(err, store.ErrAbsent) || err == nil && m.UID < mb.UIDNext {
 				return nil
 			} else if err != nil {
 				return fmt.Errorf("finding message with max uid in mailbox: %w", err)
@@ -3863,8 +3863,8 @@ func cmdEnsureParsed(c *cmd) {
 	}()
 
 	n := 0
-	err = a.DB.Write(context.Background(), func(tx *bstore.Tx) error {
-		q := bstore.QueryTx[store.Message](tx)
+	err = a.DB.Write(context.Background(), func(tx store.Tx) error {
+		q := store.Query[store.Message](tx)
 		q.FilterEqual("Expunged", false)
 		q.FilterFn(func(m store.Message) bool {
 			return all || m.ParsedBuf == nil
@@ -4191,8 +4191,8 @@ Opens database files directly, not going through a running mox instance.
 
 		wq := moxio.NewWorkQueue(procs, workqueuesize, prepareMessages, processMessage)
 
-		err = a.DB.Write(context.Background(), func(tx *bstore.Tx) error {
-			q := bstore.QueryTx[store.Message](tx)
+		err = a.DB.Write(context.Background(), func(tx store.Tx) error {
+			q := store.Query[store.Message](tx)
 			q.FilterEqual("Expunged", false)
 			q.SortAsc("ID")
 			if limit > 0 {
@@ -4230,7 +4230,7 @@ For testing the pagination. Operates directly on queue database.
 	mustLoadConfig()
 	err := queue.Init()
 	xcheckf(err, "init queue")
-	err = queue.DB.Write(context.Background(), func(tx *bstore.Tx) error {
+	err = queue.DB.Write(context.Background(), func(tx store.Tx) error {
 		now := time.Now()
 
 		// Cause autoincrement ID for queue.Msg to be forwarded, and use the reserved ID

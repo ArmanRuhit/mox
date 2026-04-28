@@ -11,8 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mjl-/bstore"
-
 	"github.com/mjl-/mox/dsn"
 	"github.com/mjl-/mox/message"
 	"github.com/mjl-/mox/smtp"
@@ -35,7 +33,7 @@ func TestHookIncoming(t *testing.T) {
 	testIncoming := func(a *store.Account, expIn bool) {
 		t.Helper()
 
-		_, err := bstore.QueryDB[Hook](ctxbg, DB).Delete()
+		_, err := store.QueryDB[Hook](ctxbg, DB).Delete()
 		tcheck(t, err, "clean up hooks")
 
 		mr := bytes.NewReader([]byte(testmsg))
@@ -67,7 +65,7 @@ func TestHookIncoming(t *testing.T) {
 		err = Incoming(ctxbg, pkglog, a, "<random@localhost>", m, part, "Inbox")
 		tcheck(t, err, "pass incoming message")
 
-		hl, err := bstore.QueryDB[Hook](ctxbg, DB).List()
+		hl, err := store.QueryDB[Hook](ctxbg, DB).List()
 		tcheck(t, err, "list hooks")
 		if !expIn {
 			tcompare(t, len(hl), 0)
@@ -166,9 +164,9 @@ func TestFromIDIncomingDelivery(t *testing.T) {
 	testIncoming := func(a *store.Account, rawmsg []byte, retiredFromID string, expIn bool, expOut *webhook.Outgoing) {
 		t.Helper()
 
-		_, err := bstore.QueryDB[Hook](ctxbg, DB).Delete()
+		_, err := store.QueryDB[Hook](ctxbg, DB).Delete()
 		tcheck(t, err, "clean up hooks")
-		_, err = bstore.QueryDB[MsgRetired](ctxbg, DB).Delete()
+		_, err = store.QueryDB[MsgRetired](ctxbg, DB).Delete()
 		tcheck(t, err, "clean up retired messages")
 
 		qmr := MsgRetired{
@@ -201,7 +199,7 @@ func TestFromIDIncomingDelivery(t *testing.T) {
 		err = Incoming(ctxbg, pkglog, a, "<random@localhost>", m, part, "Inbox")
 		tcheck(t, err, "pass incoming message")
 
-		hl, err := bstore.QueryDB[Hook](ctxbg, DB).List()
+		hl, err := store.QueryDB[Hook](ctxbg, DB).List()
 		tcheck(t, err, "list hooks")
 		if !expIn && expOut == nil {
 			tcompare(t, len(hl), 0)
@@ -351,7 +349,7 @@ func TestFromIDIncomingDelivery(t *testing.T) {
 	}))
 	defer hs.Close()
 
-	h, err := bstore.QueryDB[Hook](ctxbg, DB).Get()
+	h, err := store.QueryDB[Hook](ctxbg, DB).Get()
 	tcheck(t, err, "get hook from queue")
 
 	next := hookNextWork(ctxbg, pkglog, map[string]struct{}{"https://other.example/": {}})
@@ -396,7 +394,7 @@ func TestFromIDIncomingDelivery(t *testing.T) {
 	hookDeliver(pkglog, h)
 	<-hookDeliveryResults
 	err = DB.Get(ctxbg, &h)
-	tcompare(t, err, bstore.ErrAbsent)
+	tcompare(t, err, store.ErrAbsent)
 	hr := HookRetired{ID: h.ID}
 	err = DB.Get(ctxbg, &hr)
 	tcheck(t, err, "get retired hook after delivery")
@@ -408,7 +406,7 @@ func TestFromIDIncomingDelivery(t *testing.T) {
 
 	// Check that cleaning up retired webhooks works.
 	cleanupHookRetiredSingle(pkglog)
-	hrl, err := bstore.QueryDB[HookRetired](ctxbg, DB).List()
+	hrl, err := store.QueryDB[HookRetired](ctxbg, DB).List()
 	tcheck(t, err, "listing retired hooks")
 	tcompare(t, len(hrl), 0)
 
@@ -425,7 +423,7 @@ func TestFromIDIncomingDelivery(t *testing.T) {
 
 	// Keep attempting and failing delivery until we give up.
 	addHook(accret)
-	h, err = bstore.QueryDB[Hook](ctxbg, DB).Get()
+	h, err = store.QueryDB[Hook](ctxbg, DB).Get()
 	tcheck(t, err, "get added hook")
 	h.URL = hs.URL
 	handler = handleError
@@ -440,7 +438,7 @@ func TestFromIDIncomingDelivery(t *testing.T) {
 	hookDeliver(pkglog, h)
 	<-hookDeliveryResults
 	err = DB.Get(ctxbg, &h)
-	tcompare(t, err, bstore.ErrAbsent)
+	tcompare(t, err, store.ErrAbsent)
 	hr = HookRetired{ID: h.ID}
 	err = DB.Get(ctxbg, &hr)
 	tcheck(t, err, "get retired hook after failure")
@@ -452,21 +450,21 @@ func TestFromIDIncomingDelivery(t *testing.T) {
 
 	// Check account "hook" doesn't get retired webhooks.
 	addHook(acchook)
-	h, err = bstore.QueryDB[Hook](ctxbg, DB).Get()
+	h, err = store.QueryDB[Hook](ctxbg, DB).Get()
 	tcheck(t, err, "get added hook")
 	handler = handleOK
 	h.URL = hs.URL
 	hookDeliver(pkglog, h)
 	<-hookDeliveryResults
 	err = DB.Get(ctxbg, &h)
-	tcompare(t, err, bstore.ErrAbsent)
+	tcompare(t, err, store.ErrAbsent)
 	hr = HookRetired{ID: h.ID}
 	err = DB.Get(ctxbg, &hr)
-	tcompare(t, err, bstore.ErrAbsent)
+	tcompare(t, err, store.ErrAbsent)
 
 	// HookCancel
 	addHook(accret)
-	h, err = bstore.QueryDB[Hook](ctxbg, DB).Get()
+	h, err = store.QueryDB[Hook](ctxbg, DB).Get()
 	tcheck(t, err, "get added hook")
 	n, err = HookCancel(ctxbg, pkglog, HookFilter{})
 	tcheck(t, err, "canceling hook")
@@ -477,9 +475,9 @@ func TestFromIDIncomingDelivery(t *testing.T) {
 
 	// Superseding: When a webhook is scheduled for a message that already has a
 	// pending webhook, the previous webhook should be removed/retired.
-	_, err = bstore.QueryDB[HookRetired](ctxbg, DB).Delete()
+	_, err = store.QueryDB[HookRetired](ctxbg, DB).Delete()
 	tcheck(t, err, "clean up retired webhooks")
-	_, err = bstore.QueryDB[MsgRetired](ctxbg, DB).Delete()
+	_, err = store.QueryDB[MsgRetired](ctxbg, DB).Delete()
 	tcheck(t, err, "clean up retired messages")
 	qmr := MsgRetired{
 		SenderAccount:      accret.Name,
@@ -506,15 +504,15 @@ func TestFromIDIncomingDelivery(t *testing.T) {
 	// Cause first webhook.
 	err = Incoming(ctxbg, pkglog, accret, "<random@localhost>", m, part, "Inbox")
 	tcheck(t, err, "pass incoming message")
-	h, err = bstore.QueryDB[Hook](ctxbg, DB).Get()
+	h, err = store.QueryDB[Hook](ctxbg, DB).Get()
 	tcheck(t, err, "get hook")
 
 	// Cause second webhook for same message. First should now be retired and marked as superseded.
 	err = Incoming(ctxbg, pkglog, accret, "<random@localhost>", m, part, "Inbox")
 	tcheck(t, err, "pass incoming message again")
-	h2, err := bstore.QueryDB[Hook](ctxbg, DB).Get()
+	h2, err := store.QueryDB[Hook](ctxbg, DB).Get()
 	tcheck(t, err, "get hook")
-	hr, err = bstore.QueryDB[HookRetired](ctxbg, DB).Get()
+	hr, err = store.QueryDB[HookRetired](ctxbg, DB).Get()
 	tcheck(t, err, "get retired hook")
 	tcompare(t, h.ID, hr.ID)
 	tcompare(t, hr.SupersededByID, h2.ID)
@@ -531,7 +529,7 @@ func TestHookListFilterSort(t *testing.T) {
 	h1.Submitted = now.Add(-time.Second)
 	h1.NextAttempt = now.Add(time.Minute)
 	hl := []Hook{h, h, h, h, h, h1}
-	err := DB.Write(ctxbg, func(tx *bstore.Tx) error {
+	err := DB.Write(ctxbg, func(tx store.Tx) error {
 		for i := range hl {
 			err := hookInsert(tx, &hl[i], now, time.Minute)
 			tcheck(t, err, "insert hook")
@@ -641,7 +639,7 @@ func TestHookListFilterSort(t *testing.T) {
 
 	// Retire messages and do similar but more basic tests. The code is similar.
 	var hrl []HookRetired
-	err = DB.Write(ctxbg, func(tx *bstore.Tx) error {
+	err = DB.Write(ctxbg, func(tx store.Tx) error {
 		for _, h := range hl {
 			hr := h.Retired(false, h.NextAttempt, time.Now().Add(time.Minute).Round(0))
 			err := tx.Insert(&hr)
