@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/mjl-/bstore"
+
 	"github.com/mjl-/mox/message"
 	"github.com/mjl-/mox/mlog"
 	"github.com/mjl-/mox/moxio"
@@ -43,7 +45,7 @@ func rejectPresent(log mlog.Log, acc *store.Account, rejectsMailbox string, m *s
 	var exists bool
 	var err error
 	acc.WithRLock(func() {
-		err = acc.DB.Read(context.TODO(), func(tx store.Tx) error {
+		err = acc.DB.Read(context.TODO(), func(tx *bstore.Tx) error {
 			mb, err := acc.MailboxFind(tx, rejectsMailbox)
 			if err != nil {
 				return fmt.Errorf("looking for rejects mailbox: %w", err)
@@ -51,7 +53,7 @@ func rejectPresent(log mlog.Log, acc *store.Account, rejectsMailbox string, m *s
 				return nil
 			}
 
-			q := store.Query[store.Message](tx)
+			q := bstore.QueryTx[store.Message](tx)
 			q.FilterNonzero(store.Message{MailboxID: mb.ID})
 			q.FilterEqual("Expunged", false)
 			q.FilterFn(func(m store.Message) bool {

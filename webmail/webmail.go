@@ -31,6 +31,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
+	"github.com/mjl-/bstore"
 	"github.com/mjl-/sherpa"
 
 	"github.com/mjl-/mox/message"
@@ -131,16 +132,16 @@ func xcheckuserf(ctx context.Context, err error, format string, args ...any) {
 	panic(&sherpa.Error{Code: "user:error", Message: errmsg})
 }
 
-func xdbwrite(ctx context.Context, acc *store.Account, fn func(tx store.Tx)) {
-	err := acc.DB.Write(ctx, func(tx store.Tx) error {
+func xdbwrite(ctx context.Context, acc *store.Account, fn func(tx *bstore.Tx)) {
+	err := acc.DB.Write(ctx, func(tx *bstore.Tx) error {
 		fn(tx)
 		return nil
 	})
 	xcheckf(ctx, err, "transaction")
 }
 
-func xdbread(ctx context.Context, acc *store.Account, fn func(tx store.Tx)) {
-	err := acc.DB.Read(ctx, func(tx store.Tx) error {
+func xdbread(ctx context.Context, acc *store.Account, fn func(tx *bstore.Tx)) {
+	err := acc.DB.Read(ctx, func(tx *bstore.Tx) error {
 		fn(tx)
 		return nil
 	})
@@ -406,7 +407,7 @@ func handle(apiHandler http.Handler, isForwarded bool, accountPath string, w htt
 		xcheckf(ctx, err, "open account")
 
 		m = store.Message{ID: id}
-		err = acc.DB.Read(ctx, func(tx store.Tx) error {
+		err = acc.DB.Read(ctx, func(tx *bstore.Tx) error {
 			if err := tx.Get(&m); err != nil {
 				return err
 			} else if m.Expunged {
@@ -419,7 +420,7 @@ func handle(apiHandler http.Handler, isForwarded bool, accountPath string, w htt
 			moreHeaders = s.ShowHeaders
 			return nil
 		})
-		if err == store.ErrAbsent || err == nil && m.Expunged {
+		if err == bstore.ErrAbsent || err == nil && m.Expunged {
 			http.NotFound(w, r)
 			return
 		}

@@ -7,8 +7,9 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/mjl-/bstore"
+
 	"github.com/mjl-/mox/mlog"
-	"github.com/mjl-/mox/store"
 	"github.com/mjl-/mox/smtp"
 	"github.com/mjl-/mox/webapi"
 )
@@ -31,7 +32,7 @@ func baseAddress(a smtp.Path) smtp.Path {
 //
 // SuppressionList does not check if an account exists.
 func SuppressionList(ctx context.Context, account string) ([]webapi.Suppression, error) {
-	q := store.QueryDB[webapi.Suppression](ctx, DB)
+	q := bstore.QueryDB[webapi.Suppression](ctx, DB)
 	if account != "" {
 		q.FilterNonzero(webapi.Suppression{Account: account})
 	}
@@ -44,10 +45,10 @@ func SuppressionList(ctx context.Context, account string) ([]webapi.Suppression,
 // SuppressionLookup does not check if an account exists.
 func SuppressionLookup(ctx context.Context, account string, address smtp.Path) (*webapi.Suppression, error) {
 	baseAddr := baseAddress(address).XString(true)
-	q := store.QueryDB[webapi.Suppression](ctx, DB)
+	q := bstore.QueryDB[webapi.Suppression](ctx, DB)
 	q.FilterNonzero(webapi.Suppression{Account: account, BaseAddress: baseAddr})
 	sup, err := q.Get()
-	if err == store.ErrAbsent {
+	if err == bstore.ErrAbsent {
 		return nil, nil
 	}
 	return &sup, err
@@ -72,14 +73,14 @@ func SuppressionAdd(ctx context.Context, originalAddress smtp.Path, sup *webapi.
 // SuppressionRemove does not check if an account exists.
 func SuppressionRemove(ctx context.Context, account string, address smtp.Path) error {
 	baseAddr := baseAddress(address).XString(true)
-	q := store.QueryDB[webapi.Suppression](ctx, DB)
+	q := bstore.QueryDB[webapi.Suppression](ctx, DB)
 	q.FilterNonzero(webapi.Suppression{Account: account, BaseAddress: baseAddr})
 	n, err := q.Delete()
 	if err != nil {
 		return err
 	}
 	if n == 0 {
-		return store.ErrAbsent
+		return bstore.ErrAbsent
 	}
 	return nil
 }
@@ -94,11 +95,11 @@ type suppressionCheck struct {
 }
 
 // process failures, possibly creating suppressions.
-func suppressionProcess(log mlog.Log, tx store.Tx, scl ...suppressionCheck) (suppressedMsgIDs []int64, err error) {
+func suppressionProcess(log mlog.Log, tx *bstore.Tx, scl ...suppressionCheck) (suppressedMsgIDs []int64, err error) {
 	for _, sc := range scl {
 		xlog := log.With(slog.Any("suppressioncheck", sc))
 		baseAddr := baseAddress(sc.Recipient).XString(true)
-		exists, err := store.Query[webapi.Suppression](tx).FilterNonzero(webapi.Suppression{Account: sc.Account, BaseAddress: baseAddr}).Exists()
+		exists, err := bstore.QueryTx[webapi.Suppression](tx).FilterNonzero(webapi.Suppression{Account: sc.Account, BaseAddress: baseAddr}).Exists()
 		if err != nil {
 			return nil, fmt.Errorf("checking if address is in suppression list: %v", err)
 		} else if exists {
@@ -118,7 +119,7 @@ func suppressionProcess(log mlog.Log, tx store.Tx, scl ...suppressionCheck) (sup
 		} else {
 			// If two most recent deliveries failed (excluding this one, so three most recent
 			// messages including this one), we'll add the address to the list.
-			q := store.Query[MsgRetired](tx)
+			q := bstore.QueryTx[MsgRetired](tx)
 			q.FilterNonzero(MsgRetired{RecipientAddress: origAddr})
 			q.FilterNotEqual("ID", sc.MsgID)
 			q.SortDesc("LastActivity")

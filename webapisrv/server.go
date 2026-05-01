@@ -30,6 +30,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
+	"github.com/mjl-/bstore"
+
 	"github.com/mjl-/mox/dkim"
 	"github.com/mjl-/mox/dns"
 	"github.com/mjl-/mox/message"
@@ -552,16 +554,16 @@ func xcheckuserf(err error, format string, args ...any) {
 	}
 }
 
-func xdbwrite(ctx context.Context, acc *store.Account, fn func(tx store.Tx)) {
-	err := acc.DB.Write(ctx, func(tx store.Tx) error {
+func xdbwrite(ctx context.Context, acc *store.Account, fn func(tx *bstore.Tx)) {
+	err := acc.DB.Write(ctx, func(tx *bstore.Tx) error {
 		fn(tx)
 		return nil
 	})
 	xcheckf(err, "transaction")
 }
 
-func xdbread(ctx context.Context, acc *store.Account, fn func(tx store.Tx)) {
-	err := acc.DB.Read(ctx, func(tx store.Tx) error {
+func xdbread(ctx context.Context, acc *store.Account, fn func(tx *bstore.Tx)) {
+	err := acc.DB.Read(ctx, func(tx *bstore.Tx) error {
 		fn(tx)
 		return nil
 	})
@@ -649,7 +651,7 @@ func (s server) Send(ctx context.Context, req webapi.SendRequest) (resp webapi.S
 	}
 
 	// Check outgoing message rate limit.
-	xdbread(ctx, acc, func(tx store.Tx) {
+	xdbread(ctx, acc, func(tx *bstore.Tx) {
 		msglimit, rcptlimit, err := acc.SendLimitReached(tx, recipients)
 		if msglimit >= 0 {
 			metricSubmission.WithLabelValues("messagelimiterror").Inc()
@@ -1060,9 +1062,9 @@ func (s server) Send(ctx context.Context, req webapi.SendRequest) (resp webapi.S
 					panic(x)
 				}
 			}()
-			xdbwrite(ctx, reqInfo.Account, func(tx store.Tx) {
-				sentmb, err := store.Query[store.Mailbox](tx).FilterEqual("Expunged", false).FilterEqual("Sent", true).Get()
-				if err == store.ErrAbsent {
+			xdbwrite(ctx, reqInfo.Account, func(tx *bstore.Tx) {
+				sentmb, err := bstore.QueryTx[store.Mailbox](tx).FilterEqual("Expunged", false).FilterEqual("Sent", true).Get()
+				if err == bstore.ErrAbsent {
 					// There is no mailbox designated as Sent mailbox, so we're done.
 					return
 				}
@@ -1181,8 +1183,8 @@ func xwebapiAddresses(l []message.Address) (r []webapi.NameAddress) {
 func xmessageGet(ctx context.Context, acc *store.Account, msgID int64) (store.Message, store.Mailbox) {
 	m := store.Message{ID: msgID}
 	var mb store.Mailbox
-	err := acc.DB.Read(ctx, func(tx store.Tx) error {
-		if err := tx.Get(&m); err == store.ErrAbsent || err == nil && m.Expunged {
+	err := acc.DB.Read(ctx, func(tx *bstore.Tx) error {
+		if err := tx.Get(&m); err == bstore.ErrAbsent || err == nil && m.Expunged {
 			panic(webapi.Error{Code: "messageNotFound", Message: "message not found"})
 		}
 		var err error

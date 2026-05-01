@@ -15,6 +15,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
+	"github.com/mjl-/bstore"
+
 	"github.com/mjl-/mox/dns"
 	"github.com/mjl-/mox/dsn"
 	"github.com/mjl-/mox/message"
@@ -37,7 +39,7 @@ var (
 
 // failMsgsDB calls failMsgsTx with a new transaction, logging transaction errors.
 func failMsgsDB(qlog mlog.Log, msgs []*Msg, dialedIPs map[string][]net.IP, backoff time.Duration, remoteMTA dsn.NameIP, err error) {
-	xerr := DB.Write(context.Background(), func(tx store.Tx) error {
+	xerr := DB.Write(context.Background(), func(tx *bstore.Tx) error {
 		failMsgsTx(qlog, tx, msgs, dialedIPs, backoff, remoteMTA, err)
 		return nil
 	})
@@ -60,7 +62,7 @@ func failMsgsDB(qlog mlog.Log, msgs []*Msg, dialedIPs map[string][]net.IP, backo
 // is delivered to the sender account.
 // Caller must call kick() after commiting the transaction for any (re)scheduling
 // of messages and webhooks.
-func failMsgsTx(qlog mlog.Log, tx store.Tx, msgs []*Msg, dialedIPs map[string][]net.IP, backoff time.Duration, remoteMTA dsn.NameIP, err error) {
+func failMsgsTx(qlog mlog.Log, tx *bstore.Tx, msgs []*Msg, dialedIPs map[string][]net.IP, backoff time.Duration, remoteMTA dsn.NameIP, err error) {
 	// todo future: when we implement relaying, we should be able to send DSNs to non-local users. and possibly specify a null mailfrom. ../rfc/5321:1503
 	// todo future: when we implement relaying, and a dsn cannot be delivered, and requiretls was active, we cannot drop the message. instead deliver to local postmaster? though ../rfc/8689:383 may intend to say the dsn should be delivered without requiretls?
 	// todo future: when we implement smtp dsn extension, parameter RET=FULL must be disregarded for messages with REQUIRETLS. ../rfc/8689:379
@@ -168,7 +170,7 @@ func failMsgsTx(qlog mlog.Log, tx store.Tx, msgs []*Msg, dialedIPs map[string][]
 
 	process := func() error {
 		// Update DialedIPs in message, and record the result.
-		qup := store.Query[Msg](tx)
+		qup := bstore.QueryTx[Msg](tx)
 		qup.FilterIDs(ids)
 		umsgs, err := qup.List()
 		if err != nil {

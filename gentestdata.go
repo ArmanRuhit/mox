@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mjl-/bstore"
 	"github.com/mjl-/sconf"
 
 	"github.com/mjl-/mox/config"
@@ -255,8 +256,8 @@ Accounts:
 	xcheckf(err, "open account test1")
 	err = accTest1.ThreadingWait(c.log)
 	xcheckf(err, "wait for threading to finish")
-	err = accTest1.DB.Write(ctxbg, func(tx store.Tx) error {
-		inbox, err := store.Query[store.Mailbox](tx).FilterNonzero(store.Mailbox{Name: "Inbox"}).Get()
+	err = accTest1.DB.Write(ctxbg, func(tx *bstore.Tx) error {
+		inbox, err := bstore.QueryTx[store.Mailbox](tx).FilterNonzero(store.Mailbox{Name: "Inbox"}).Get()
 		xcheckf(err, "looking up inbox")
 		const msg = "From: <other@remote.example>\r\nTo: <test1@mox.example>\r\nSubject: test\r\n\r\nthe message...\r\n"
 		m := store.Message{
@@ -307,8 +308,8 @@ Accounts:
 	xcheckf(err, "open account test2")
 	err = accTest2.ThreadingWait(c.log)
 	xcheckf(err, "wait for threading to finish")
-	err = accTest2.DB.Write(ctxbg, func(tx store.Tx) error {
-		inbox, err := store.Query[store.Mailbox](tx).FilterNonzero(store.Mailbox{Name: "Inbox"}).Get()
+	err = accTest2.DB.Write(ctxbg, func(tx *bstore.Tx) error {
+		inbox, err := bstore.QueryTx[store.Mailbox](tx).FilterNonzero(store.Mailbox{Name: "Inbox"}).Get()
 		xcheckf(err, "looking up inbox")
 		const msg0 = "From: <other@remote.example>\r\nTo: <☹@xn--74h.example>\r\nSubject: test\r\n\r\nthe message...\r\n"
 		m0 := store.Message{
@@ -346,7 +347,7 @@ Accounts:
 		err = tx.Update(&inbox)
 		xcheckf(err, "update inbox")
 
-		sent, err := store.Query[store.Mailbox](tx).FilterNonzero(store.Mailbox{Name: "Sent"}).Get()
+		sent, err := bstore.QueryTx[store.Mailbox](tx).FilterNonzero(store.Mailbox{Name: "Sent"}).Get()
 		xcheckf(err, "looking up inbox")
 		const prefix1 = "Extra: test\r\n"
 		const msg1 = "From: <other@remote.example>\r\nTo: <☹@xn--74h.example>\r\nSubject: test\r\n\r\nthe message...\r\n"

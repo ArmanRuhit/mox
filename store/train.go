@@ -7,6 +7,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+
+	"github.com/mjl-/bstore"
+
 	"github.com/mjl-/mox/config"
 	"github.com/mjl-/mox/junk"
 	"github.com/mjl-/mox/mlog"
@@ -61,7 +64,7 @@ func (a *Account) ensureJunkFilter(ctx context.Context, log mlog.Log, jfOpt *jun
 
 // RetrainMessages (un)trains messages, if relevant given their flags. Updates
 // m.TrainedJunk after retraining.
-func (a *Account) RetrainMessages(ctx context.Context, log mlog.Log, tx Tx, msgs []Message) (rerr error) {
+func (a *Account) RetrainMessages(ctx context.Context, log mlog.Log, tx *bstore.Tx, msgs []Message) (rerr error) {
 	if len(msgs) == 0 {
 		return nil
 	}
@@ -101,7 +104,7 @@ func (a *Account) RetrainMessages(ctx context.Context, log mlog.Log, tx Tx, msgs
 
 // RetrainMessage untrains and/or trains a message, if relevant given m.TrainedJunk
 // and m.Junk/m.Notjunk. Updates m.TrainedJunk after retraining.
-func (a *Account) RetrainMessage(ctx context.Context, log mlog.Log, tx Tx, jf *junk.Filter, m *Message) error {
+func (a *Account) RetrainMessage(ctx context.Context, log mlog.Log, tx *bstore.Tx, jf *junk.Filter, m *Message) error {
 	need, untrain, untrainJunk, train, trainJunk := m.needsTraining()
 	if !need {
 		return nil

@@ -109,12 +109,11 @@ func TestReputation(t *testing.T) {
 		defer os.Remove(p)
 
 		opts := bstore.Options{Timeout: 5 * time.Second, RegisterLogger: log.Logger}
-		rawdb, err := bstore.Open(ctxbg, p, &opts, store.DBTypes...)
+		db, err := bstore.Open(ctxbg, p, &opts, store.DBTypes...)
 		tcheck(t, err, "open db")
-		db := store.NewBstoreDB(rawdb)
 		defer db.Close()
 
-		err = db.Write(ctxbg, func(tx store.Tx) error {
+		err = db.Write(ctxbg, func(tx *bstore.Tx) error {
 			inbox := store.Mailbox{ID: 1, Name: "Inbox", HaveCounts: true}
 			err = tx.Insert(&inbox)
 			tcheck(t, err, "insert into db")
@@ -147,7 +146,7 @@ func TestReputation(t *testing.T) {
 		var isjunk *bool
 		var conclusive bool
 		var method reputationMethod
-		err = db.Read(ctxbg, func(tx store.Tx) error {
+		err = db.Read(ctxbg, func(tx *bstore.Tx) error {
 			var err error
 			isjunk, conclusive, method, _, err = reputation(tx, pkglog, &m, false)
 			return err

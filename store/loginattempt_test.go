@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mjl-/bstore"
+
 	"github.com/mjl-/mox/mox-"
 )
 
@@ -87,7 +89,7 @@ func TestLoginAttempt(t *testing.T) {
 	tcompare(t, len(l), 2)
 
 	// Removing account will keep last entry for mjl2.
-	err = AuthDB.Write(ctxbg, func(tx Tx) error {
+	err = AuthDB.Write(ctxbg, func(tx *bstore.Tx) error {
 		return loginAttemptRemoveAccount(tx, "mjl1")
 	})
 	tcheck(t, err, "remove login attempt account")

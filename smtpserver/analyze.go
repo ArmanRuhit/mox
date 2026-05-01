@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mjl-/bstore"
+
 	"github.com/mjl-/mox/config"
 	"github.com/mjl-/mox/dkim"
 	"github.com/mjl-/mox/dmarc"
@@ -110,7 +112,7 @@ func analyze(ctx context.Context, log mlog.Log, resolver dns.Resolver, d deliver
 	// account. They may fill up the mailbox, either with messages that have to be
 	// purged, or by filling the disk. We check both cases for IP's and networks.
 	var rateError bool // Whether returned error represents a rate error.
-	err := d.acc.DB.Read(ctx, func(tx store.Tx) (retErr error) {
+	err := d.acc.DB.Read(ctx, func(tx *bstore.Tx) (retErr error) {
 		now := time.Now()
 		defer func() {
 			log.Debugx("checking message and size delivery rates", retErr, slog.Duration("duration", time.Since(now)))
@@ -120,7 +122,7 @@ func analyze(ctx context.Context, log mlog.Log, resolver dns.Resolver, d deliver
 			if retErr != nil {
 				return
 			}
-			q := store.Query[store.Message](tx)
+			q := bstore.QueryTx[store.Message](tx)
 			q.FilterNonzero(msg)
 			q.FilterGreater("Received", now.Add(-window))
 			q.FilterEqual("Expunged", false)
@@ -139,7 +141,7 @@ func analyze(ctx context.Context, log mlog.Log, resolver dns.Resolver, d deliver
 			if retErr != nil {
 				return
 			}
-			q := store.Query[store.Message](tx)
+			q := bstore.QueryTx[store.Message](tx)
 			q.FilterNonzero(msg)
 			q.FilterGreater("Received", now.Add(-window))
 			q.FilterEqual("Expunged", false)
@@ -247,7 +249,7 @@ func analyze(ctx context.Context, log mlog.Log, resolver dns.Resolver, d deliver
 		addReasonText("ruleset indicates forwarded message")
 	}
 
-	assignMailbox := func(tx store.Tx) error {
+	assignMailbox := func(tx *bstore.Tx) error {
 		// Set message MailboxID to which mail will be delivered. Reputation is
 		// per-mailbox. If referenced mailbox is not found (e.g. does not yet exist), we
 		// can still determine a reputation because we also base it on outgoing
@@ -280,7 +282,7 @@ func analyze(ctx context.Context, log mlog.Log, resolver dns.Resolver, d deliver
 		if d.m.MailboxDestinedID == 0 {
 			var mberr error
 			d.acc.WithRLock(func() {
-				mberr = d.acc.DB.Read(ctx, func(tx store.Tx) error {
+				mberr = d.acc.DB.Read(ctx, func(tx *bstore.Tx) error {
 					return assignMailbox(tx)
 				})
 			})
@@ -415,7 +417,7 @@ func analyze(ctx context.Context, log mlog.Log, resolver dns.Resolver, d deliver
 	var method reputationMethod
 	var reason string
 	d.acc.WithRLock(func() {
-		err = d.acc.DB.Read(ctx, func(tx store.Tx) error {
+		err = d.acc.DB.Read(ctx, func(tx *bstore.Tx) error {
 			if err := assignMailbox(tx); err != nil {
 				return err
 			}

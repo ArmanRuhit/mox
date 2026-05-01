@@ -11,6 +11,9 @@ import (
 	"slices"
 	"sort"
 	"time"
+
+	"github.com/mjl-/bstore"
+
 	"github.com/mjl-/mox/message"
 	"github.com/mjl-/mox/mlog"
 	"github.com/mjl-/mox/moxio"
@@ -23,10 +26,10 @@ import (
 // may have a threadid 0. That results in this message getting threadid 0, which
 // will handled by the background upgrade process assigning a threadid when it gets
 // to this message.
-func assignThread(log mlog.Log, tx Tx, m *Message, part *message.Part) error {
+func assignThread(log mlog.Log, tx *bstore.Tx, m *Message, part *message.Part) error {
 	if m.MessageID != "" {
 		// Match against existing different message with same Message-ID.
-		q := Query[Message](tx)
+		q := bstore.QueryTx[Message](tx)
 		q.FilterNonzero(Message{MessageID: m.MessageID})
 		q.FilterEqual("Expunged", false)
 		q.FilterNotEqual("ID", m.ID)
@@ -34,7 +37,7 @@ func assignThread(log mlog.Log, tx Tx, m *Message, part *message.Part) error {
 		q.SortAsc("ID")
 		q.Limit(1)
 		em, err := q.Get()
-		if err != nil && err != ErrAbsent {
+		if err != nil && err != bstore.ErrAbsent {
 			return fmt.Errorf("looking up existing message with message-id: %v", err)
 		} else if err == nil {
 			assignParent(m, em, true)
@@ -164,7 +167,7 @@ func (a *Account) ResetThreading(ctx context.Context, log mlog.Log, batchSize in
 			}
 		}
 
-		err := a.DB.Write(ctx, func(tx Tx) error {
+		err := a.DB.Write(ctx, func(tx *bstore.Tx) error {
 			processMessage := func(in, m Message) error {
 				if clearIDs {
 					m.ThreadID = 0
@@ -178,14 +181,14 @@ func (a *Account) ResetThreading(ctx context.Context, log mlog.Log, batchSize in
 			procs := runtime.GOMAXPROCS(0)
 			wq := moxio.NewWorkQueue[Message, Message](procs, 2*procs, prepareMessages, processMessage)
 
-			q := Query[Message](tx)
+			q := bstore.QueryTx[Message](tx)
 			q.FilterEqual("Expunged", false)
 			q.FilterGreater("ID", lastID)
 			q.SortAsc("ID")
 			err := q.ForEach(func(m Message) error {
 				// We process in batches so we don't block other operations for a long time.
 				if n >= batchSize {
-					return StopForEach
+					return bstore.StopForEach
 				}
 				// Update starting point for next batch.
 				lastID = m.ID
@@ -228,7 +231,7 @@ func (a *Account) ResetThreading(ctx context.Context, log mlog.Log, batchSize in
 // Does not set Seen flag for muted threads.
 //
 // Progress is written to progressWriter, every 100k messages.
-func (a *Account) AssignThreads(ctx context.Context, log mlog.Log, txOpt Tx, startMessageID int64, batchSize int, xprogressWriter io.Writer) error {
+func (a *Account) AssignThreads(ctx context.Context, log mlog.Log, txOpt *bstore.Tx, startMessageID int64, batchSize int, xprogressWriter io.Writer) error {
 	// We use a more basic version of the thread-matching algorithm describe in:
 	// ../rfc/5256:443
 	// The algorithm assumes you'll select messages, then group into threads. We normally do
@@ -256,7 +259,7 @@ func (a *Account) AssignThreads(ctx context.Context, log mlog.Log, txOpt Tx, sta
 	pending := map[string][]childMsg{}
 
 	// Current tx. If not equal to txOpt, we clean it up before we leave.
-	var tx Tx
+	var tx *bstore.Tx
 	defer func() {
 		if tx != nil && tx != txOpt {
 			err := tx.Rollback()
@@ -272,14 +275,14 @@ func (a *Account) AssignThreads(ctx context.Context, log mlog.Log, txOpt Tx, sta
 			// already has a threadid.
 			// If there are multiple messages for a message-id a future call to assign may use
 			// its threadid, or it may end up in pending and we resolve it when we need to.
-			q := Query[Message](tx)
+			q := bstore.QueryTx[Message](tx)
 			q.FilterNonzero(Message{MessageID: m.MessageID})
 			q.FilterEqual("Expunged", false)
 			q.FilterLess("ID", m.ID)
 			q.SortAsc("ID")
 			q.Limit(1)
 			em, err := q.Get()
-			if err != nil && err != ErrAbsent {
+			if err != nil && err != bstore.ErrAbsent {
 				return false, fmt.Errorf("looking up existing message with message-id: %v", err)
 			} else if err == nil {
 				if em.ThreadID == 0 {
@@ -496,14 +499,14 @@ func (a *Account) AssignThreads(ctx context.Context, log mlog.Log, txOpt Tx, sta
 
 		// We assign threads in order by ID, so messages delivered in between our
 		// transaction will get assigned threads too: they'll have the highest id's.
-		q := Query[Message](tx)
+		q := bstore.QueryTx[Message](tx)
 		q.FilterGreaterEqual("ID", startMessageID)
 		q.FilterEqual("Expunged", false)
 		q.SortAsc("ID")
 		err := q.ForEach(func(m Message) error {
 			// Batch number of changes, so we give other users of account a change to run.
 			if txOpt == nil && n >= batchSize {
-				return StopForEach
+				return bstore.StopForEach
 			}
 			// Starting point for next batch.
 			startMessageID = m.ID + 1
@@ -602,7 +605,7 @@ func (a *Account) AssignThreads(ctx context.Context, log mlog.Log, txOpt Tx, sta
 			}
 
 			// Cycle detected. Make this message-id the thread root.
-			q := Query[Message](tx)
+			q := bstore.QueryTx[Message](tx)
 			q.FilterNonzero(Message{MessageID: msgid})
 			q.FilterEqual("ThreadID", int64(0))
 			q.FilterEqual("Expunged", false)
@@ -658,7 +661,7 @@ func (a *Account) AssignThreads(ctx context.Context, log mlog.Log, txOpt Tx, sta
 	}
 
 	// Check that there are no more messages without threadid.
-	q := Query[Message](tx)
+	q := bstore.QueryTx[Message](tx)
 	q.FilterEqual("ThreadID", int64(0))
 	q.FilterEqual("Expunged", false)
 	l, err := q.List()
@@ -685,8 +688,8 @@ func (a *Account) AssignThreads(ctx context.Context, log mlog.Log, txOpt Tx, sta
 // If the message isn't present (with a valid thread id), a nil message and nil
 // error is returned. The bool return value indicates if a message with the
 // message-id exists at all.
-func lookupThreadMessage(tx Tx, mID int64, messageID, subjectBase string, isDSN bool) (*Message, bool, error) {
-	q := Query[Message](tx)
+func lookupThreadMessage(tx *bstore.Tx, mID int64, messageID, subjectBase string, isDSN bool) (*Message, bool, error) {
+	q := bstore.QueryTx[Message](tx)
 	q.FilterNonzero(Message{MessageID: messageID})
 	if !isDSN {
 		q.FilterEqual("SubjectBase", subjectBase)
@@ -711,8 +714,8 @@ func lookupThreadMessage(tx Tx, mID int64, messageID, subjectBase string, isDSN 
 // thread based on a matching subject. The message must have been delivered to the same mailbox originally.
 //
 // If no message (with a threadid) is found a nil message and nil error is returned.
-func lookupThreadMessageSubject(tx Tx, m Message, subjectBase string) (*Message, error) {
-	q := Query[Message](tx)
+func lookupThreadMessageSubject(tx *bstore.Tx, m Message, subjectBase string) (*Message, error) {
+	q := bstore.QueryTx[Message](tx)
 	q.FilterGreater("Received", m.Received.Add(-4*7*24*time.Hour))
 	q.FilterLess("Received", m.Received.Add(1*24*time.Hour))
 	q.FilterNonzero(Message{SubjectBase: subjectBase, MailboxOrigID: m.MailboxOrigID})
@@ -722,7 +725,7 @@ func lookupThreadMessageSubject(tx Tx, m Message, subjectBase string) (*Message,
 	q.SortDesc("Received")
 	q.Limit(1)
 	tm, err := q.Get()
-	if err == ErrAbsent {
+	if err == bstore.ErrAbsent {
 		return nil, nil
 	} else if err != nil {
 		return nil, err
@@ -748,7 +751,7 @@ func upgradeThreads(ctx context.Context, log mlog.Log, acc *Account, up Upgrade)
 		}
 
 		// Must refresh up, it may have been modified by another upgrade progress.
-		err = acc.DB.Write(ctx, func(tx Tx) error {
+		err = acc.DB.Write(ctx, func(tx *bstore.Tx) error {
 			up = Upgrade{ID: up.ID}
 			if err := tx.Get(&up); err != nil {
 				return err
@@ -776,7 +779,7 @@ func upgradeThreads(ctx context.Context, log mlog.Log, acc *Account, up Upgrade)
 		}
 
 		// Must refresh up, it may have been modified by another upgrade progress.
-		err := acc.DB.Write(ctx, func(tx Tx) error {
+		err := acc.DB.Write(ctx, func(tx *bstore.Tx) error {
 			up = Upgrade{ID: up.ID}
 			if err := tx.Get(&up); err != nil {
 				return err
