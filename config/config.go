@@ -74,8 +74,6 @@ type Static struct {
 	OutgoingTLSReportsForAllSuccess bool  `sconf:"optional" sconf-doc:"Also send TLS reports if there were no SMTP STARTTLS connection failures. By default, reports are only sent when at least one failure occurred. If a report is sent, it does always include the successful connection counts as well."`
 	QuotaMessageSize                int64 `sconf:"optional" sconf-doc:"Default maximum total message size in bytes for each individual account, only applicable if greater than zero. Can be overridden per account. Attempting to add new messages to an account beyond its maximum total size will result in an error. Useful to prevent a single account from filling storage. The quota only applies to the email message files, not to any file system overhead and also not the message index database file (account for approximately 15% overhead)."`
 
-	PostgreSQL *PostgreSQLConfig `sconf:"optional" sconf-doc:"Optional PostgreSQL backend for the auth, account index and queue databases. When set, mox uses PostgreSQL instead of the default embedded bstore. Message files remain on the filesystem under DataDir."`
-
 	// All IPs that were explicitly listened on for external SMTP. Only set when there
 	// are no unspecified external SMTP listeners and there is at most one for IPv4 and
 	// at most one for IPv6. Used for setting the local address when making outgoing
@@ -105,16 +103,6 @@ type SpecialUseMailboxes struct {
 	Trash   string `sconf:"optional"`
 	Draft   string `sconf:"optional"`
 	Junk    string `sconf:"optional"`
-}
-
-// PostgreSQLConfig configures the optional PostgreSQL database backend.
-// Either DSN or DSNFile must be set. Per-account data is isolated via
-// schema "account_<name>"; auth and queue use schemas "auth" and "queue".
-type PostgreSQLConfig struct {
-	DSN      string `sconf:"optional" sconf-doc:"PostgreSQL connection string in libpq URI or keyword=value form, e.g. postgres://user:pass@host:5432/mox?sslmode=require. Mutually exclusive with DSNFile."`
-	DSNFile  string `sconf:"optional" sconf-doc:"Path to a file containing the PostgreSQL connection string. Useful to keep credentials out of mox.conf. Evaluated relative to the directory of mox.conf. Mutually exclusive with DSN."`
-	MaxConns int32  `sconf:"optional" sconf-doc:"Maximum number of connections in the pgx pool. Default 10."`
-	MinConns int32  `sconf:"optional" sconf-doc:"Minimum number of idle connections kept warm in the pgx pool. Default 0."`
 }
 
 // Dynamic is the parsed form of domains.conf, and is automatically reloaded when changed.

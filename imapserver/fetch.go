@@ -14,6 +14,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/mjl-/bstore"
+
 	"github.com/mjl-/mox/message"
 	"github.com/mjl-/mox/mlog"
 	"github.com/mjl-/mox/mox-"
@@ -25,7 +27,7 @@ import (
 type fetchCmd struct {
 	conn            *conn
 	isUID           bool        // If this is a UID FETCH command.
-	rtx             store.Tx  // Read-only transaction, kept open while processing all messages.
+	rtx             *bstore.Tx  // Read-only transaction, kept open while processing all messages.
 	updateSeen      []store.UID // To mark as seen after processing all messages. UID instead of message ID since moved messages keep their ID and insert a new ID in the original mailbox.
 	hasChangedSince bool        // Whether CHANGEDSINCE was set. Enables MODSEQ in response.
 	expungeIssued   bool        // Set if any message has been expunged. Can happen for expunged messages.
@@ -169,7 +171,7 @@ func (c *conn) cmdxFetch(isUID bool, tag, cmdstr string, p *parser) {
 		// the database for "VANISHED (EARLIER)" anyway, to see UIDs that aren't in the
 		// session anymore. Vanished must be used with changedSince. ../rfc/7162:871
 		if changedSince > 0 {
-			q := store.Query[store.Message](cmd.rtx)
+			q := bstore.QueryTx[store.Message](cmd.rtx)
 			q.FilterNonzero(store.Message{MailboxID: c.mailboxID})
 			q.FilterGreater("ModSeq", store.ModSeqFromClient(changedSince))
 			if !vanished {
@@ -293,7 +295,7 @@ func (c *conn) cmdxFetch(isUID bool, tag, cmdstr string, p *parser) {
 		c.account.WithWLock(func() {
 			changes := make([]store.Change, 0, len(cmd.updateSeen)+1)
 
-			c.xdbwrite(func(wtx store.Tx) {
+			c.xdbwrite(func(wtx *bstore.Tx) {
 				mb, err := store.MailboxID(wtx, c.mailboxID)
 				if err == store.ErrMailboxExpunged {
 					xusercodeErrorf("NONEXISTENT", "mailbox has been expunged")
@@ -303,7 +305,7 @@ func (c *conn) cmdxFetch(isUID bool, tag, cmdstr string, p *parser) {
 				var modseq store.ModSeq
 
 				for _, uid := range cmd.updateSeen {
-					m, err := store.Query[store.Message](wtx).FilterNonzero(store.Message{MailboxID: c.mailboxID, UID: uid}).Get()
+					m, err := bstore.QueryTx[store.Message](wtx).FilterNonzero(store.Message{MailboxID: c.mailboxID, UID: uid}).Get()
 					xcheckf(err, "get message")
 					if m.Expunged {
 						// Message has been deleted in the mean time.
@@ -334,7 +336,7 @@ func (c *conn) cmdxFetch(isUID bool, tag, cmdstr string, p *parser) {
 				changes = append(changes, mb.ChangeCounts())
 
 				for uid, s := range cmd.newPreviews {
-					m, err := store.Query[store.Message](wtx).FilterNonzero(store.Message{MailboxID: c.mailboxID, UID: uid}).Get()
+					m, err := bstore.QueryTx[store.Message](wtx).FilterNonzero(store.Message{MailboxID: c.mailboxID, UID: uid}).Get()
 					xcheckf(err, "get message")
 					if m.Expunged {
 						// Message has been deleted in the mean time.
@@ -378,7 +380,7 @@ func (cmd *fetchCmd) xensureMessage() *store.Message {
 
 	// We do not filter by Expunged, the message may have been deleted in other
 	// sessions, but not in ours.
-	q := store.Query[store.Message](cmd.rtx)
+	q := bstore.QueryTx[store.Message](cmd.rtx)
 	q.FilterNonzero(store.Message{MailboxID: cmd.mailboxID, UID: cmd.uid})
 	m, err := q.Get()
 	cmd.xcheckf(err, "get message for uid %d", cmd.uid)

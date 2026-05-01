@@ -28,6 +28,7 @@ import (
 
 	_ "embed"
 
+	"github.com/mjl-/bstore"
 	"github.com/mjl-/sherpa"
 	"github.com/mjl-/sherpadoc"
 	"github.com/mjl-/sherpaprom"
@@ -169,7 +170,7 @@ func (Webmail) ParsedMessage(ctx context.Context, msgID int64) (pm ParsedMessage
 	log := reqInfo.Log
 	acc := reqInfo.Account
 
-	xdbread(ctx, acc, func(tx store.Tx) {
+	xdbread(ctx, acc, func(tx *bstore.Tx) {
 		m := xmessageID(ctx, tx, msgID)
 
 		state := msgState{acc: acc}
@@ -187,7 +188,7 @@ func (Webmail) ParsedMessage(ctx context.Context, msgID int64) (pm ParsedMessage
 }
 
 // fromAddrViewMode returns the view mode for a from address.
-func fromAddrViewMode(tx store.Tx, from MessageAddress) (store.ViewMode, error) {
+func fromAddrViewMode(tx *bstore.Tx, from MessageAddress) (store.ViewMode, error) {
 	settingsViewMode := func() (store.ViewMode, error) {
 		settings := store.Settings{ID: 1}
 		if err := tx.Get(&settings); err != nil {
@@ -206,7 +207,7 @@ func fromAddrViewMode(tx store.Tx, from MessageAddress) (store.ViewMode, error) 
 	fromAddr := smtp.NewAddress(lp, from.Domain).Pack(true)
 	fas := store.FromAddressSettings{FromAddress: fromAddr}
 	err = tx.Get(&fas)
-	if err == store.ErrAbsent {
+	if err == bstore.ErrAbsent {
 		return settingsViewMode()
 	} else if err != nil {
 		return store.ModeText, err
@@ -223,7 +224,7 @@ func (Webmail) FromAddressSettingsSave(ctx context.Context, fas store.FromAddres
 		xcheckuserf(ctx, errors.New("empty from address"), "checking address")
 	}
 
-	xdbwrite(ctx, acc, func(tx store.Tx) {
+	xdbwrite(ctx, acc, func(tx *bstore.Tx) {
 		if tx.Get(&store.FromAddressSettings{FromAddress: fas.FromAddress}) == nil {
 			err := tx.Update(&fas)
 			xcheckf(ctx, err, "updating settings for from address")
@@ -247,12 +248,12 @@ func (Webmail) MessageFindMessageID(ctx context.Context, messageID string) (id i
 		xcheckuserf(ctx, errors.New("empty message-id"), "parsing message-id")
 	}
 
-	xdbread(ctx, acc, func(tx store.Tx) {
-		q := store.Query[store.Message](tx)
+	xdbread(ctx, acc, func(tx *bstore.Tx) {
+		q := bstore.QueryTx[store.Message](tx)
 		q.FilterEqual("Expunged", false)
 		q.FilterNonzero(store.Message{MessageID: messageID})
 		m, err := q.Get()
-		if err == store.ErrAbsent {
+		if err == bstore.ErrAbsent {
 			return
 		}
 		xcheckf(ctx, err, "looking up message by message-id")
@@ -381,7 +382,7 @@ func (w Webmail) MessageCompose(ctx context.Context, m ComposeMessage, mailboxID
 
 	// Add In-Reply-To and References headers.
 	if m.ResponseMessageID > 0 {
-		xdbread(ctx, acc, func(tx store.Tx) {
+		xdbread(ctx, acc, func(tx *bstore.Tx) {
 			rm := xmessageID(ctx, tx, m.ResponseMessageID)
 			msgr := acc.MessageReader(rm)
 			defer func() {
@@ -435,7 +436,7 @@ func (w Webmail) MessageCompose(ctx context.Context, m ComposeMessage, mailboxID
 			}
 		}()
 
-		xdbwrite(ctx, acc, func(tx store.Tx) {
+		xdbwrite(ctx, acc, func(tx *bstore.Tx) {
 			var modseq store.ModSeq // Only set if needed.
 
 			if m.DraftMessageID > 0 {
@@ -545,12 +546,12 @@ func parseAddress(msghdr string) (message.NameAddress, error) {
 	return message.NameAddress{DisplayName: a.Name, Address: path}, nil
 }
 
-func xmailboxID(ctx context.Context, tx store.Tx, mailboxID int64) store.Mailbox {
+func xmailboxID(ctx context.Context, tx *bstore.Tx, mailboxID int64) store.Mailbox {
 	if mailboxID == 0 {
 		xcheckuserf(ctx, errors.New("invalid zero mailbox ID"), "getting mailbox")
 	}
 	mb, err := store.MailboxID(tx, mailboxID)
-	if err == store.ErrAbsent || err == store.ErrMailboxExpunged {
+	if err == bstore.ErrAbsent || err == store.ErrMailboxExpunged {
 		xcheckuserf(ctx, err, "getting mailbox")
 	}
 	xcheckf(ctx, err, "getting mailbox")
@@ -558,13 +559,13 @@ func xmailboxID(ctx context.Context, tx store.Tx, mailboxID int64) store.Mailbox
 }
 
 // xmessageID returns a non-expunged message or panics with a sherpa error.
-func xmessageID(ctx context.Context, tx store.Tx, messageID int64) store.Message {
+func xmessageID(ctx context.Context, tx *bstore.Tx, messageID int64) store.Message {
 	if messageID == 0 {
 		xcheckuserf(ctx, errors.New("invalid zero message id"), "getting message")
 	}
 	m := store.Message{ID: messageID}
 	err := tx.Get(&m)
-	if err == store.ErrAbsent {
+	if err == bstore.ErrAbsent {
 		xcheckuserf(ctx, errors.New("message does not exist"), "getting message")
 	} else if err == nil && m.Expunged {
 		xcheckuserf(ctx, errors.New("message was removed"), "getting message")
@@ -663,7 +664,7 @@ func (w Webmail) MessageSubmit(ctx context.Context, m SubmitMessage) {
 	}
 
 	// Check outgoing message rate limit.
-	xdbread(ctx, acc, func(tx store.Tx) {
+	xdbread(ctx, acc, func(tx *bstore.Tx) {
 		rcpts := make([]smtp.Path, len(recipients))
 		for i, r := range recipients {
 			rcpts[i] = smtp.Path{Localpart: r.Localpart, IPDomain: dns.IPDomain{Domain: r.Domain}}
@@ -754,7 +755,7 @@ func (w Webmail) MessageSubmit(ctx context.Context, m SubmitMessage) {
 	xc.Header("Date", time.Now().Format(message.RFC5322Z))
 	// Add In-Reply-To and References headers.
 	if m.ResponseMessageID > 0 {
-		xdbread(ctx, acc, func(tx store.Tx) {
+		xdbread(ctx, acc, func(tx *bstore.Tx) {
 			rm := xmessageID(ctx, tx, m.ResponseMessageID)
 			msgr := acc.MessageReader(rm)
 			defer func() {
@@ -877,7 +878,7 @@ func (w Webmail) MessageSubmit(ctx context.Context, m SubmitMessage) {
 
 		if len(m.ForwardAttachments.Paths) > 0 {
 			acc.WithRLock(func() {
-				xdbread(ctx, acc, func(tx store.Tx) {
+				xdbread(ctx, acc, func(tx *bstore.Tx) {
 					fm := xmessageID(ctx, tx, m.ForwardAttachments.MessageID)
 					msgr := acc.MessageReader(fm)
 					defer func() {
@@ -1032,7 +1033,7 @@ func (w Webmail) MessageSubmit(ctx context.Context, m SubmitMessage) {
 			}
 		}()
 
-		xdbwrite(ctx, acc, func(tx store.Tx) {
+		xdbwrite(ctx, acc, func(tx *bstore.Tx) {
 			if m.DraftMessageID > 0 {
 				nchanges := xops.MessageDeleteTx(ctx, log, tx, acc, []int64{m.DraftMessageID}, &modseq)
 				changes = append(changes, nchanges...)
@@ -1074,14 +1075,14 @@ func (w Webmail) MessageSubmit(ctx context.Context, m SubmitMessage) {
 				// Move messages from this thread still in this mailbox to the designated Archive
 				// mailbox.
 				if m.ArchiveThread {
-					mbArchive, err := store.Query[store.Mailbox](tx).FilterEqual("Expunged", false).FilterEqual("Archive", true).Get()
-					if err == store.ErrAbsent || err == store.ErrMailboxExpunged {
+					mbArchive, err := bstore.QueryTx[store.Mailbox](tx).FilterEqual("Expunged", false).FilterEqual("Archive", true).Get()
+					if err == bstore.ErrAbsent || err == store.ErrMailboxExpunged {
 						xcheckuserf(ctx, errors.New("not configured"), "looking up designated archive mailbox")
 					}
 					xcheckf(ctx, err, "looking up designated archive mailbox")
 
 					var msgIDs []int64
-					q := store.Query[store.Message](tx)
+					q := bstore.QueryTx[store.Message](tx)
 					q.FilterNonzero(store.Message{ThreadID: rm.ThreadID, MailboxID: m.ArchiveReferenceMailboxID})
 					q.FilterEqual("Expunged", false)
 					err = q.IDs(&msgIDs)
@@ -1094,8 +1095,8 @@ func (w Webmail) MessageSubmit(ctx context.Context, m SubmitMessage) {
 				}
 			}
 
-			sentmb, err := store.Query[store.Mailbox](tx).FilterEqual("Expunged", false).FilterEqual("Sent", true).Get()
-			if err == store.ErrAbsent || err == store.ErrMailboxExpunged {
+			sentmb, err := bstore.QueryTx[store.Mailbox](tx).FilterEqual("Expunged", false).FilterEqual("Sent", true).Get()
+			if err == bstore.ErrAbsent || err == store.ErrMailboxExpunged {
 				// There is no mailbox designated as Sent mailbox, so we're done.
 				return
 			}
@@ -1217,7 +1218,7 @@ func (Webmail) MailboxCreate(ctx context.Context, name string) {
 
 	acc.WithWLock(func() {
 		var changes []store.Change
-		xdbwrite(ctx, acc, func(tx store.Tx) {
+		xdbwrite(ctx, acc, func(tx *bstore.Tx) {
 			var exists bool
 			var err error
 			_, changes, _, exists, err = acc.MailboxCreate(tx, name, store.SpecialUse{})
@@ -1240,7 +1241,7 @@ func (Webmail) MailboxDelete(ctx context.Context, mailboxID int64) {
 	acc.WithWLock(func() {
 		var changes []store.Change
 
-		xdbwrite(ctx, acc, func(tx store.Tx) {
+		xdbwrite(ctx, acc, func(tx *bstore.Tx) {
 			mb := xmailboxID(ctx, tx, mailboxID)
 			if mb.Name == "Inbox" {
 				// Inbox is special in IMAP and cannot be removed.
@@ -1270,10 +1271,10 @@ func (Webmail) MailboxEmpty(ctx context.Context, mailboxID int64) {
 	acc.WithWLock(func() {
 		var changes []store.Change
 
-		xdbwrite(ctx, acc, func(tx store.Tx) {
+		xdbwrite(ctx, acc, func(tx *bstore.Tx) {
 			mb := xmailboxID(ctx, tx, mailboxID)
 
-			qm := store.Query[store.Message](tx)
+			qm := bstore.QueryTx[store.Message](tx)
 			qm.FilterNonzero(store.Message{MailboxID: mb.ID})
 			qm.FilterEqual("Expunged", false)
 			qm.SortAsc("UID")
@@ -1314,7 +1315,7 @@ func (Webmail) MailboxRename(ctx context.Context, mailboxID int64, newName strin
 	acc.WithWLock(func() {
 		var changes []store.Change
 
-		xdbwrite(ctx, acc, func(tx store.Tx) {
+		xdbwrite(ctx, acc, func(tx *bstore.Tx) {
 			mbsrc := xmailboxID(ctx, tx, mailboxID)
 			var err error
 			var isInbox, alreadyExists bool
@@ -1342,14 +1343,14 @@ func (Webmail) CompleteRecipient(ctx context.Context, search string) ([]string, 
 	var matches []string
 	all := true
 	acc.WithRLock(func() {
-		xdbread(ctx, acc, func(tx store.Tx) {
+		xdbread(ctx, acc, func(tx *bstore.Tx) {
 			type key struct {
 				localpart string
 				domain    string
 			}
 			seen := map[key]bool{}
 
-			q := store.Query[store.Recipient](tx)
+			q := bstore.QueryTx[store.Recipient](tx)
 			q.SortDesc("Sent")
 			err := q.ForEach(func(r store.Recipient) error {
 				k := key{r.Localpart, r.Domain}
@@ -1363,7 +1364,7 @@ func (Webmail) CompleteRecipient(ctx context.Context, search string) ([]string, 
 				}
 				if len(matches) >= 20 {
 					all = false
-					return store.StopForEach
+					return bstore.StopForEach
 				}
 
 				// Look in the message that was sent for a name along with the address.
@@ -1453,7 +1454,7 @@ func (Webmail) MailboxSetSpecialUse(ctx context.Context, mb store.Mailbox) {
 	acc.WithWLock(func() {
 		var changes []store.Change
 
-		xdbwrite(ctx, acc, func(tx store.Tx) {
+		xdbwrite(ctx, acc, func(tx *bstore.Tx) {
 			xmb := xmailboxID(ctx, tx, mb.ID)
 
 			modseq, err := acc.NextModSeq(tx)
@@ -1466,7 +1467,7 @@ func (Webmail) MailboxSetSpecialUse(ctx context.Context, mb store.Mailbox) {
 					return
 				}
 				var ombl []store.Mailbox
-				q := store.Query[store.Mailbox](tx)
+				q := bstore.QueryTx[store.Mailbox](tx)
 				q.FilterNotEqual("ID", mb.ID)
 				q.FilterEqual(specialUse, true)
 				q.Gather(&ombl)
@@ -1507,7 +1508,7 @@ func (Webmail) ThreadCollapse(ctx context.Context, messageIDs []int64, collapse 
 
 	acc.WithWLock(func() {
 		changes := make([]store.Change, 0, len(messageIDs))
-		xdbwrite(ctx, acc, func(tx store.Tx) {
+		xdbwrite(ctx, acc, func(tx *bstore.Tx) {
 			// Gather ThreadIDs to list all potential messages, for a way to get all potential
 			// (child) messages. Further refined in FilterFn.
 			threadIDs := map[int64]struct{}{}
@@ -1515,8 +1516,8 @@ func (Webmail) ThreadCollapse(ctx context.Context, messageIDs []int64, collapse 
 			for _, id := range messageIDs {
 				m := store.Message{ID: id}
 				err := tx.Get(&m)
-				if err == store.ErrAbsent || err == nil && m.Expunged {
-					xcheckuserf(ctx, store.ErrAbsent, "get message")
+				if err == bstore.ErrAbsent || err == nil && m.Expunged {
+					xcheckuserf(ctx, bstore.ErrAbsent, "get message")
 				}
 				xcheckf(ctx, err, "get message")
 				threadIDs[m.ThreadID] = struct{}{}
@@ -1524,7 +1525,7 @@ func (Webmail) ThreadCollapse(ctx context.Context, messageIDs []int64, collapse 
 			}
 
 			var updated []store.Message
-			q := store.Query[store.Message](tx)
+			q := bstore.QueryTx[store.Message](tx)
 			q.FilterEqual("Expunged", false)
 			q.FilterEqual("ThreadID", slicesAny(slices.Sorted(maps.Keys(threadIDs)))...)
 			q.FilterNotEqual("ThreadCollapsed", collapse)
@@ -1562,14 +1563,14 @@ func (Webmail) ThreadMute(ctx context.Context, messageIDs []int64, mute bool) {
 
 	acc.WithWLock(func() {
 		changes := make([]store.Change, 0, len(messageIDs))
-		xdbwrite(ctx, acc, func(tx store.Tx) {
+		xdbwrite(ctx, acc, func(tx *bstore.Tx) {
 			threadIDs := map[int64]struct{}{}
 			msgIDs := map[int64]struct{}{}
 			for _, id := range messageIDs {
 				m := store.Message{ID: id}
 				err := tx.Get(&m)
-				if err == store.ErrAbsent || err == nil && m.Expunged {
-					xcheckuserf(ctx, store.ErrAbsent, "get message")
+				if err == bstore.ErrAbsent || err == nil && m.Expunged {
+					xcheckuserf(ctx, bstore.ErrAbsent, "get message")
 				}
 				xcheckf(ctx, err, "get message")
 				threadIDs[m.ThreadID] = struct{}{}
@@ -1578,7 +1579,7 @@ func (Webmail) ThreadMute(ctx context.Context, messageIDs []int64, mute bool) {
 
 			var updated []store.Message
 
-			q := store.Query[store.Message](tx)
+			q := bstore.QueryTx[store.Message](tx)
 			q.FilterEqual("Expunged", false)
 			q.FilterEqual("ThreadID", slicesAny(slices.Sorted(maps.Keys(threadIDs)))...)
 			q.FilterFn(func(tm store.Message) bool {
@@ -1760,11 +1761,11 @@ func recipientSecurity(ctx context.Context, log mlog.Log, resolver dns.Resolver,
 	reqInfo := ctx.Value(requestInfoCtxKey).(requestInfo)
 	acc := reqInfo.Account
 
-	err = acc.DB.Read(ctx, func(tx store.Tx) error {
-		q := store.Query[store.RecipientDomainTLS](tx)
+	err = acc.DB.Read(ctx, func(tx *bstore.Tx) error {
+		q := bstore.QueryTx[store.RecipientDomainTLS](tx)
 		q.FilterNonzero(store.RecipientDomainTLS{Domain: addr.Domain.Name()})
 		rd, err := q.Get()
-		if err == store.ErrAbsent {
+		if err == bstore.ErrAbsent {
 			return nil
 		} else if err != nil {
 			rs.STARTTLS = SecurityResultError
@@ -1813,7 +1814,7 @@ func (Webmail) RulesetSuggestMove(ctx context.Context, msgID, mbSrcID, mbDstID i
 	acc := reqInfo.Account
 	log := reqInfo.Log
 
-	xdbread(ctx, acc, func(tx store.Tx) {
+	xdbread(ctx, acc, func(tx *bstore.Tx) {
 		m := xmessageID(ctx, tx, msgID)
 		mbSrc := xmailboxID(ctx, tx, mbSrcID)
 		mbDst := xmailboxID(ctx, tx, mbDstID)
@@ -1836,12 +1837,12 @@ func (Webmail) RulesetSuggestMove(ctx context.Context, msgID, mbSrcID, mbDstID i
 		}
 
 		// Check if we have a previous answer "No" answer for moving from/to mailbox.
-		exists, err := store.Query[store.RulesetNoMailbox](tx).FilterNonzero(store.RulesetNoMailbox{MailboxID: mbSrcID}).FilterEqual("ToMailbox", false).Exists()
+		exists, err := bstore.QueryTx[store.RulesetNoMailbox](tx).FilterNonzero(store.RulesetNoMailbox{MailboxID: mbSrcID}).FilterEqual("ToMailbox", false).Exists()
 		xcheckf(ctx, err, "looking up previous response for source mailbox")
 		if exists {
 			return
 		}
-		exists, err = store.Query[store.RulesetNoMailbox](tx).FilterNonzero(store.RulesetNoMailbox{MailboxID: mbDstID}).FilterEqual("ToMailbox", true).Exists()
+		exists, err = bstore.QueryTx[store.RulesetNoMailbox](tx).FilterNonzero(store.RulesetNoMailbox{MailboxID: mbDstID}).FilterEqual("ToMailbox", true).Exists()
 		xcheckf(ctx, err, "looking up previous response for destination mailbox")
 		if exists {
 			return
@@ -1875,7 +1876,7 @@ func (Webmail) RulesetSuggestMove(ctx context.Context, msgID, mbSrcID, mbDstID i
 				ListID:        listID,
 				ToInbox:       mbDst.Name == "Inbox",
 			}
-			exists, err = store.Query[store.RulesetNoListID](tx).FilterNonzero(no).Exists()
+			exists, err = bstore.QueryTx[store.RulesetNoListID](tx).FilterNonzero(no).Exists()
 			xcheckf(ctx, err, "looking up previous response for list-id")
 			if exists {
 				return
@@ -1924,7 +1925,7 @@ func (Webmail) RulesetSuggestMove(ctx context.Context, msgID, mbSrcID, mbDstID i
 				MsgFromAddress: msgFrom,
 				ToInbox:        mbDst.Name == "Inbox",
 			}
-			exists, err = store.Query[store.RulesetNoMsgFrom](tx).FilterNonzero(no).Exists()
+			exists, err = bstore.QueryTx[store.RulesetNoMsgFrom](tx).FilterNonzero(no).Exists()
 			xcheckf(ctx, err, "looking up previous response for message from address")
 			if exists {
 				return

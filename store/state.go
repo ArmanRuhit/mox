@@ -6,6 +6,9 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+
+	"github.com/mjl-/bstore"
+
 	"github.com/mjl-/mox/metrics"
 	"github.com/mjl-/mox/mlog"
 	"github.com/mjl-/mox/mox-"
@@ -207,7 +210,7 @@ func eraseMessages(log mlog.Log, acc *Account, ids []int64) {
 
 	acc.Lock()
 	defer acc.Unlock()
-	err := acc.DB.Write(mox.Context, func(tx Tx) error {
+	err := acc.DB.Write(mox.Context, func(tx *bstore.Tx) error {
 		du := DiskUsage{ID: 1}
 		if err := tx.Get(&du); err != nil {
 			return fmt.Errorf("get disk usage: %v", err)

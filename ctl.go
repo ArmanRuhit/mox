@@ -20,6 +20,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mjl-/bstore"
+
 	"github.com/mjl-/mox/admin"
 	"github.com/mjl-/mox/config"
 	"github.com/mjl-/mox/dns"
@@ -1475,8 +1477,8 @@ func servectlcmd(ctx context.Context, xctl *ctl, cid int64, shutdown func()) {
 
 				// Read through messages with either junk or nonjunk flag set, and train them.
 				var total, trained int
-				err = acc.DB.Write(ctx, func(tx store.Tx) error {
-					q := store.Query[store.Message](tx)
+				err = acc.DB.Write(ctx, func(tx *bstore.Tx) error {
+					q := bstore.QueryTx[store.Message](tx)
 					q.FilterEqual("Expunged", false)
 					return q.ForEach(func(m store.Message) error {
 						total++
@@ -1537,9 +1539,9 @@ func servectlcmd(ctx context.Context, xctl *ctl, cid int64, shutdown func()) {
 
 		acc.WithWLock(func() {
 			var changes []store.Change
-			err = acc.DB.Write(ctx, func(tx store.Tx) error {
+			err = acc.DB.Write(ctx, func(tx *bstore.Tx) error {
 				var totalSize int64
-				err := store.Query[store.Mailbox](tx).FilterEqual("Expunged", false).ForEach(func(mb store.Mailbox) error {
+				err := bstore.QueryTx[store.Mailbox](tx).FilterEqual("Expunged", false).ForEach(func(mb store.Mailbox) error {
 					mc, err := mb.CalculateCounts(tx)
 					if err != nil {
 						return fmt.Errorf("calculating counts for mailbox %q: %w", mb.Name, err)
@@ -1612,8 +1614,8 @@ func servectlcmd(ctx context.Context, xctl *ctl, cid int64, shutdown func()) {
 					mailboxCounts := map[int64]store.Mailbox{} // For broadcasting.
 
 					// Don't process all message in one transaction, we could block the account for too long.
-					err := acc.DB.Write(ctx, func(tx store.Tx) error {
-						q := store.Query[store.Message](tx)
+					err := acc.DB.Write(ctx, func(tx *bstore.Tx) error {
+						q := bstore.QueryTx[store.Message](tx)
 						q.FilterEqual("Expunged", false)
 						q.FilterGreater("ID", lastID)
 						q.Limit(batchSize)

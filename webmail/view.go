@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mjl-/bstore"
 	"github.com/mjl-/sherpa"
 
 	"github.com/mjl-/mox/dns"
@@ -487,7 +488,7 @@ type ioErr struct {
 }
 
 // ensure we have a non-nil moreHeaders, taking it from Settings.
-func ensureMoreHeaders(tx store.Tx, moreHeaders []string) ([]string, error) {
+func ensureMoreHeaders(tx *bstore.Tx, moreHeaders []string) ([]string, error) {
 	if moreHeaders != nil {
 		return moreHeaders, nil
 	}
@@ -686,7 +687,7 @@ func serveEvents(ctx context.Context, log mlog.Log, accountPath string, w http.R
 
 	// qtx is kept around during connection initialization, until we pass it off to the
 	// goroutine that starts querying for messages.
-	var qtx store.Tx
+	var qtx *bstore.Tx
 	defer func() {
 		if qtx != nil {
 			err := qtx.Rollback()
@@ -703,7 +704,7 @@ func serveEvents(ctx context.Context, log mlog.Log, accountPath string, w http.R
 		qtx, err = acc.DB.Begin(reqctx, false)
 		xcheckf(ctx, err, "begin transaction")
 
-		mbl, err = store.Query[store.Mailbox](qtx).FilterEqual("Expunged", false).List()
+		mbl, err = bstore.QueryTx[store.Mailbox](qtx).FilterEqual("Expunged", false).List()
 		xcheckf(ctx, err, "list mailboxes")
 
 		err = qtx.Get(&settings)
@@ -816,7 +817,7 @@ func serveEvents(ctx context.Context, log mlog.Log, accountPath string, w http.R
 		defer storeNewPreviews(ctx, log, acc, newPreviews)
 
 		// We get a transaction first time we need it.
-		var xtx store.Tx
+		var xtx *bstore.Tx
 		defer func() {
 			if xtx != nil {
 				err := xtx.Rollback()
@@ -839,7 +840,7 @@ func serveEvents(ctx context.Context, log mlog.Log, accountPath string, w http.R
 			if err := ensureTx(); err != nil {
 				return store.Message{}, fmt.Errorf("transaction: %v", err)
 			}
-			return store.Query[store.Message](xtx).FilterEqual("Expunged", false).FilterNonzero(store.Message{MailboxID: mailboxID, UID: uid}).Get()
+			return bstore.QueryTx[store.Message](xtx).FilterEqual("Expunged", false).FilterNonzero(store.Message{MailboxID: mailboxID, UID: uid}).Get()
 		}
 
 		// Additional headers from settings to add to MessageItems.
@@ -862,7 +863,7 @@ func serveEvents(ctx context.Context, log mlog.Log, accountPath string, w http.R
 			}
 			err := ensureTx()
 			xcheckf(ctx, err, "transaction")
-			q := store.Query[store.Message](xtx)
+			q := bstore.QueryTx[store.Message](xtx)
 			q.FilterNonzero(store.Message{MailboxID: mailboxID})
 			q.FilterEqual("UID", uidsAny...)
 			mbOK := v.matchesMailbox(mailboxID)
@@ -1065,7 +1066,7 @@ func serveEvents(ctx context.Context, log mlog.Log, accountPath string, w http.R
 
 			stop := func() (stop bool) {
 				// rtx is handed off viewRequestTx below, but we must clean it up in case of errors.
-				var rtx store.Tx
+				var rtx *bstore.Tx
 				var err error
 				defer func() {
 					if rtx != nil {
@@ -1130,13 +1131,13 @@ func serveEvents(ctx context.Context, log mlog.Log, accountPath string, w http.R
 // f.MailboxID (-1 is special). matchMailboxes indicates whether the IDs in
 // mailboxIDs must or must not match. mailboxPrefixes is for use with
 // xgatherMailboxIDs to gather children of the mailboxIDs.
-func xprepareMailboxIDs(ctx context.Context, tx store.Tx, f Filter, rejectsMailbox string) (matchMailboxes bool, mailboxIDs map[int64]bool, mailboxPrefixes []string) {
+func xprepareMailboxIDs(ctx context.Context, tx *bstore.Tx, f Filter, rejectsMailbox string) (matchMailboxes bool, mailboxIDs map[int64]bool, mailboxPrefixes []string) {
 	matchMailboxes = true
 	mailboxIDs = map[int64]bool{}
 	if f.MailboxID == -1 {
 		matchMailboxes = false
 		// Add the trash, junk and account rejects mailbox.
-		err := store.Query[store.Mailbox](tx).FilterEqual("Expunged", false).ForEach(func(mb store.Mailbox) error {
+		err := bstore.QueryTx[store.Mailbox](tx).FilterEqual("Expunged", false).ForEach(func(mb store.Mailbox) error {
 			if mb.Trash || mb.Junk || mb.Name == rejectsMailbox {
 				mailboxPrefixes = append(mailboxPrefixes, mb.Name+"/")
 				mailboxIDs[mb.ID] = true
@@ -1155,12 +1156,12 @@ func xprepareMailboxIDs(ctx context.Context, tx store.Tx, f Filter, rejectsMailb
 
 // xgatherMailboxIDs adds all mailboxes with a prefix matching any of
 // mailboxPrefixes to mailboxIDs, to expand filtering to children of mailboxes.
-func xgatherMailboxIDs(ctx context.Context, tx store.Tx, mailboxIDs map[int64]bool, mailboxPrefixes []string) {
+func xgatherMailboxIDs(ctx context.Context, tx *bstore.Tx, mailboxIDs map[int64]bool, mailboxPrefixes []string) {
 	// Gather more mailboxes to filter on, based on mailboxPrefixes.
 	if len(mailboxPrefixes) == 0 {
 		return
 	}
-	err := store.Query[store.Mailbox](tx).FilterEqual("Expunged", false).ForEach(func(mb store.Mailbox) error {
+	err := bstore.QueryTx[store.Mailbox](tx).FilterEqual("Expunged", false).ForEach(func(mb store.Mailbox) error {
 		for _, p := range mailboxPrefixes {
 			if strings.HasPrefix(mb.Name, p) {
 				mailboxIDs[mb.ID] = true
@@ -1283,7 +1284,7 @@ func storeNewPreviews(ctx context.Context, log mlog.Log, acc *store.Account, new
 		}
 	}()
 
-	err := acc.DB.Write(ctx, func(tx store.Tx) error {
+	err := acc.DB.Write(ctx, func(tx *bstore.Tx) error {
 		for id, preview := range newPreviews {
 			m := store.Message{ID: id}
 			if err := tx.Get(&m); err != nil {
@@ -1305,7 +1306,7 @@ func storeNewPreviews(ctx context.Context, log mlog.Log, acc *store.Account, new
 // and sending Event* to the SSE connection.
 //
 // It always closes tx.
-func viewRequestTx(ctx context.Context, log mlog.Log, acc *store.Account, tx store.Tx, v view, msgc chan EventViewMsgs, errc chan EventViewErr, resetc chan EventViewReset, donec chan int64) {
+func viewRequestTx(ctx context.Context, log mlog.Log, acc *store.Account, tx *bstore.Tx, v view, msgc chan EventViewMsgs, errc chan EventViewErr, resetc chan EventViewReset, donec chan int64) {
 	// Newly generated previews which we'll save when the operation is done.
 	newPreviews := map[int64]string{}
 
@@ -1400,7 +1401,7 @@ func viewRequestTx(ctx context.Context, log mlog.Log, acc *store.Account, tx sto
 // reset due to missing AnchorMessageID, and when the end of the view was reached
 // and/or for a message.
 // newPreviews is filled with previews, the caller must save them.
-func queryMessages(ctx context.Context, log mlog.Log, acc *store.Account, tx store.Tx, v view, mrc chan msgResp, newPreviews map[int64]string) {
+func queryMessages(ctx context.Context, log mlog.Log, acc *store.Account, tx *bstore.Tx, v view, mrc chan msgResp, newPreviews map[int64]string) {
 	defer func() {
 		x := recover() // Should not happen, but don't take program down if it does.
 		if x != nil {
@@ -1421,7 +1422,7 @@ func queryMessages(ctx context.Context, log mlog.Log, acc *store.Account, tx sto
 	checkMessage := func(id int64) (valid bool, rerr error) {
 		m := store.Message{ID: id}
 		err := tx.Get(&m)
-		if err == store.ErrAbsent || err == nil && m.Expunged {
+		if err == bstore.ErrAbsent || err == nil && m.Expunged {
 			return false, nil
 		} else if err != nil {
 			return false, err
@@ -1458,7 +1459,7 @@ func queryMessages(ctx context.Context, log mlog.Log, acc *store.Account, tx sto
 
 	// todo optimize: we would like to have more filters directly on the database if they can use an index. eg if there is a keyword filter and no mailbox filter.
 
-	q := store.Query[store.Message](tx)
+	q := bstore.QueryTx[store.Message](tx)
 	q.FilterEqual("Expunged", false)
 	if len(v.mailboxIDs) > 0 {
 		if len(v.mailboxIDs) == 1 && v.matchMailboxIDs {
@@ -1557,7 +1558,7 @@ func queryMessages(ctx context.Context, log mlog.Log, acc *store.Account, tx sto
 
 		if have >= page.Count && found || have > 10000 {
 			end = false
-			return store.StopForEach
+			return bstore.StopForEach
 		}
 
 		if _, ok := v.threadIDs[m.ThreadID]; ok {
@@ -1663,14 +1664,14 @@ func queryMessages(ctx context.Context, log mlog.Log, acc *store.Account, tx sto
 	}
 }
 
-func gatherThread(log mlog.Log, tx store.Tx, acc *store.Account, v view, m store.Message, destMessageID int64, first bool, moreHeaders []string, newPreviews map[int64]string) ([]MessageItem, *ParsedMessage, error) {
+func gatherThread(log mlog.Log, tx *bstore.Tx, acc *store.Account, v view, m store.Message, destMessageID int64, first bool, moreHeaders []string, newPreviews map[int64]string) ([]MessageItem, *ParsedMessage, error) {
 	if m.ThreadID == 0 {
 		// If we would continue, FilterNonzero would fail because there are no non-zero fields.
 		return nil, nil, fmt.Errorf("message has threadid 0, account is probably still being upgraded, try turning threading off until the upgrade is done")
 	}
 
 	// Fetch other messages for this thread.
-	qt := store.Query[store.Message](tx)
+	qt := bstore.QueryTx[store.Message](tx)
 	qt.FilterNonzero(store.Message{ThreadID: m.ThreadID})
 	qt.FilterEqual("Expunged", false)
 	qt.FilterNotEqual("ID", m.ID)

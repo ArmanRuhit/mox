@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mjl-/bstore"
+
 	"github.com/mjl-/mox/store"
 )
 
@@ -90,8 +92,8 @@ func (c *conn) cmdGetmetadata(tag, cmd string, p *parser) {
 	longentries := -1 // Size of largest value skipped due to optMaxSize. ../rfc/5464:482
 
 	c.account.WithRLock(func() {
-		c.xdbread(func(tx store.Tx) {
-			q := store.Query[store.Annotation](tx)
+		c.xdbread(func(tx *bstore.Tx) {
+			q := bstore.QueryTx[store.Annotation](tx)
 			if mailboxName == "" {
 				q.FilterEqual("MailboxID", 0)
 			} else {
@@ -234,20 +236,20 @@ func (c *conn) cmdSetmetadata(tag, cmd string, p *parser) {
 		var changes []store.Change
 		var modseq store.ModSeq
 
-		c.xdbwrite(func(tx store.Tx) {
+		c.xdbwrite(func(tx *bstore.Tx) {
 			var mb store.Mailbox // mb.ID as 0 is used in query below.
 			if mailboxName != "" {
 				mb = c.xmailbox(tx, mailboxName, "TRYCREATE")
 			}
 
 			for _, a := range l {
-				q := store.Query[store.Annotation](tx)
+				q := bstore.QueryTx[store.Annotation](tx)
 				q.FilterNonzero(store.Annotation{Key: a.Key})
 				q.FilterEqual("MailboxID", mb.ID) // Can be zero.
 				q.FilterEqual("Expunged", false)
 				oa, err := q.Get()
 				// Nil means remove. ../rfc/5464:579
-				if err == store.ErrAbsent && a.Value == nil {
+				if err == bstore.ErrAbsent && a.Value == nil {
 					continue
 				}
 				if modseq == 0 {
@@ -255,7 +257,7 @@ func (c *conn) cmdSetmetadata(tag, cmd string, p *parser) {
 					modseq, err = c.account.NextModSeq(tx)
 					xcheckf(err, "get next modseq")
 				}
-				if err == store.ErrAbsent {
+				if err == bstore.ErrAbsent {
 					a.MailboxID = mb.ID
 					a.CreateSeq = modseq
 					a.ModSeq = modseq
@@ -292,12 +294,12 @@ func (c *conn) cmdSetmetadata(tag, cmd string, p *parser) {
 	c.ok(tag, cmd)
 }
 
-func (c *conn) xcheckMetadataSize(tx store.Tx) {
+func (c *conn) xcheckMetadataSize(tx *bstore.Tx) {
 	// Check for total size. We allow a total of 1000 entries, with total capacity of 1MB.
 	// ../rfc/5464:383
 	var n int
 	var size int
-	err := store.Query[store.Annotation](tx).FilterEqual("Expunged", false).ForEach(func(a store.Annotation) error {
+	err := bstore.QueryTx[store.Annotation](tx).FilterEqual("Expunged", false).ForEach(func(a store.Annotation) error {
 		n++
 		if n > metadataMaxKeys {
 			// ../rfc/5464:590

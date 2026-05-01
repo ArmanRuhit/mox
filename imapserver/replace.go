@@ -6,6 +6,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/mjl-/bstore"
+
 	"github.com/mjl-/mox/message"
 	"github.com/mjl-/mox/mlog"
 	"github.com/mjl-/mox/store"
@@ -65,7 +67,7 @@ func (c *conn) cmdxReplace(isUID bool, tag, cmd string, p *parser) {
 	// in quota. If a non-nil func is returned, an error was found. Calling the
 	// function aborts handling this command.
 	var uidOld store.UID
-	checkMessage := func(tx store.Tx) func() {
+	checkMessage := func(tx *bstore.Tx) func() {
 		if c.readonly {
 			return func() { xuserErrorf("mailbox open in read-only mode") }
 		}
@@ -81,14 +83,14 @@ func (c *conn) cmdxReplace(isUID bool, tag, cmd string, p *parser) {
 		// Resolve "*" for UID or message sequence.
 		if star {
 			if c.uidonly {
-				q := store.Query[store.Message](tx)
+				q := bstore.QueryTx[store.Message](tx)
 				q.FilterNonzero(store.Message{MailboxID: c.mailboxID})
 				q.FilterEqual("Expunged", false)
 				q.FilterLess("UID", c.uidnext)
 				q.SortDesc("UID")
 				q.Limit(1)
 				m, err := q.Get()
-				if err == store.ErrAbsent {
+				if err == bstore.ErrAbsent {
 					return func() { xsyntaxErrorf("cannot use * on empty mailbox") }
 				}
 				xcheckf(err, "get last message in mailbox")
@@ -116,12 +118,12 @@ func (c *conn) cmdxReplace(isUID bool, tag, cmd string, p *parser) {
 		// deleted just now and we won't check the quota. We'll raise an error later on,
 		// when we are not possibly reading a sync literal and can respond with unsolicited
 		// expunges.
-		q := store.Query[store.Message](tx)
+		q := bstore.QueryTx[store.Message](tx)
 		q.FilterNonzero(store.Message{MailboxID: c.mailboxID, UID: uidOld})
 		q.FilterEqual("Expunged", false)
 		q.FilterLess("UID", c.uidnext)
 		_, err = q.Get()
-		if err == store.ErrAbsent {
+		if err == bstore.ErrAbsent {
 			return nil
 		}
 		if err != nil {
@@ -147,7 +149,7 @@ func (c *conn) cmdxReplace(isUID bool, tag, cmd string, p *parser) {
 		name = xcheckmailboxname(name, true)
 
 		c.account.WithRLock(func() {
-			c.xdbread(func(tx store.Tx) {
+			c.xdbread(func(tx *bstore.Tx) {
 				errfn = checkMessage(tx)
 				if errfn != nil {
 					errfn()
@@ -163,7 +165,7 @@ func (c *conn) cmdxReplace(isUID bool, tag, cmd string, p *parser) {
 			errfn = func() { xusercodeErrorf("CANNOT", "%s", err) }
 		} else {
 			c.account.WithRLock(func() {
-				c.xdbread(func(tx store.Tx) {
+				c.xdbread(func(tx *bstore.Tx) {
 					errfn = checkMessage(tx)
 				})
 			})
@@ -243,13 +245,13 @@ func (c *conn) cmdxReplace(isUID bool, tag, cmd string, p *parser) {
 	c.account.WithWLock(func() {
 		var changes []store.Change
 
-		c.xdbwrite(func(tx store.Tx) {
+		c.xdbwrite(func(tx *bstore.Tx) {
 			mbSrc = c.xmailboxID(tx, c.mailboxID)
 
 			// Get old message. If it has been expunged, we should have a pending change for
 			// it. We'll send untagged responses and fail the command.
 			var err error
-			qom := store.Query[store.Message](tx)
+			qom := bstore.QueryTx[store.Message](tx)
 			qom.FilterNonzero(store.Message{MailboxID: mbSrc.ID, UID: uidOld})
 			om, err = qom.Get()
 			xcheckf(err, "get old message to replace from database")

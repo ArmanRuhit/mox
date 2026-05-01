@@ -13,6 +13,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/mjl-/bstore"
+
 	"github.com/mjl-/mox/config"
 	"github.com/mjl-/mox/dns"
 	"github.com/mjl-/mox/dsn"
@@ -278,7 +280,7 @@ func processDeliveries(qlog mlog.Log, m0 *Msg, msgs []*Msg, remoteAddr string, r
 		}
 	}
 	if len(delMsgs) > 0 {
-		err := DB.Write(context.Background(), func(tx store.Tx) error {
+		err := DB.Write(context.Background(), func(tx *bstore.Tx) error {
 			return retireMsgs(qlog, tx, webhook.EventDelivered, 0, "", nil, delMsgs...)
 		})
 		if err != nil {

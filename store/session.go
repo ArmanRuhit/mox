@@ -10,6 +10,9 @@ import (
 	"runtime/debug"
 	"sync"
 	"time"
+
+	"github.com/mjl-/bstore"
+
 	"github.com/mjl-/mox/metrics"
 	"github.com/mjl-/mox/mlog"
 	"github.com/mjl-/mox/mox-"
@@ -59,7 +62,7 @@ func ensureAccountSessions(ctx context.Context, log mlog.Log, accountName string
 		// We still hold the lock, not great...
 
 		accSessions = map[SessionToken]LoginSession{}
-		err = QueryDB[LoginSession](ctx, acc.DB).ForEach(func(ls LoginSession) error {
+		err = bstore.QueryDB[LoginSession](ctx, acc.DB).ForEach(func(ls LoginSession) error {
 			// We keep strings around for easy comparison.
 			ls.sessionToken = SessionToken(base64.RawURLEncoding.EncodeToString(ls.SessionTokenBinary[:]))
 			ls.csrfToken = CSRFToken(base64.RawURLEncoding.EncodeToString(ls.CSRFTokenBinary[:]))
@@ -162,7 +165,7 @@ func sessionsDelayedFlush(log mlog.Log, accountName string) {
 		log.Check(err, "closing account")
 	}()
 
-	err = acc.DB.Write(mox.Context, func(tx Tx) error {
+	err = acc.DB.Write(mox.Context, func(tx *bstore.Tx) error {
 		for sessionToken := range sessionTokens {
 			ls, ok := sessions.accounts[accountName][sessionToken]
 			if !ok {
@@ -199,7 +202,7 @@ func SessionAddToken(ctx context.Context, log mlog.Log, ls *LoginSession) error 
 func sessionAddToken(ctx context.Context, log mlog.Log, acc *Account, ls *LoginSession) error {
 	ls.ID = 0
 
-	err := acc.DB.Write(ctx, func(tx Tx) error {
+	err := acc.DB.Write(ctx, func(tx *bstore.Tx) error {
 		// Remove sessions if we have too many, starting with expired sessions, and
 		// removing the oldest if needed.
 		if len(sessions.accounts[ls.AccountName]) >= sessionsPerAccount {
@@ -300,11 +303,11 @@ func SessionRemove(ctx context.Context, log mlog.Log, accountName string, sessio
 }
 
 // sessionRemoveAll removes all session tokens for an account. Useful after a password reset.
-func sessionRemoveAll(ctx context.Context, log mlog.Log, tx Tx, accountName string) error {
+func sessionRemoveAll(ctx context.Context, log mlog.Log, tx *bstore.Tx, accountName string) error {
 	sessions.Lock()
 	defer sessions.Unlock()
 
-	if _, err := Query[LoginSession](tx).Delete(); err != nil {
+	if _, err := bstore.QueryTx[LoginSession](tx).Delete(); err != nil {
 		return err
 	}
 

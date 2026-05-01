@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/mjl-/bstore"
+
 	"github.com/mjl-/mox/mox-"
 	"github.com/mjl-/mox/store"
 )
@@ -133,7 +135,7 @@ func (c *conn) cmdList(tag, cmd string, p *parser) {
 	var respMetadata []concatspace
 
 	c.account.WithRLock(func() {
-		c.xdbread(func(tx store.Tx) {
+		c.xdbread(func(tx *bstore.Tx) {
 			type info struct {
 				mailbox    *store.Mailbox
 				subscribed bool
@@ -143,7 +145,7 @@ func (c *conn) cmdList(tag, cmd string, p *parser) {
 			hasChild := map[string]bool{}
 			var nameList []string
 
-			q := store.Query[store.Mailbox](tx)
+			q := bstore.QueryTx[store.Mailbox](tx)
 			q.FilterEqual("Expunged", false)
 			err := q.ForEach(func(mb store.Mailbox) error {
 				names[mb.Name] = info{mailbox: &mb}
@@ -155,7 +157,7 @@ func (c *conn) cmdList(tag, cmd string, p *parser) {
 			})
 			xcheckf(err, "listing mailboxes")
 
-			qs := store.Query[store.Subscription](tx)
+			qs := bstore.QueryTx[store.Subscription](tx)
 			err = qs.ForEach(func(sub store.Subscription) error {
 				info, ok := names[sub.Name]
 				info.subscribed = true
@@ -234,12 +236,12 @@ func (c *conn) cmdList(tag, cmd string, p *parser) {
 				if info.mailbox != nil && len(retMetadata) > 0 {
 					var meta listspace
 					for _, k := range retMetadata {
-						q := store.Query[store.Annotation](tx)
+						q := bstore.QueryTx[store.Annotation](tx)
 						q.FilterNonzero(store.Annotation{MailboxID: info.mailbox.ID, Key: k})
 						q.FilterEqual("Expunged", false)
 						a, err := q.Get()
 						var v token
-						if err == store.ErrAbsent {
+						if err == bstore.ErrAbsent {
 							v = nilt
 						} else {
 							xcheckf(err, "get annotation")

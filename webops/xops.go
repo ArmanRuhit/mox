@@ -13,6 +13,8 @@ import (
 	"sort"
 	"time"
 
+	"github.com/mjl-/bstore"
+
 	"github.com/mjl-/mox/junk"
 	"github.com/mjl-/mox/message"
 	"github.com/mjl-/mox/mlog"
@@ -23,17 +25,17 @@ import (
 var ErrMessageNotFound = errors.New("no such message")
 
 type XOps struct {
-	DBWrite    func(ctx context.Context, acc *store.Account, fn func(tx store.Tx))
+	DBWrite    func(ctx context.Context, acc *store.Account, fn func(tx *bstore.Tx))
 	Checkf     func(ctx context.Context, err error, format string, args ...any)
 	Checkuserf func(ctx context.Context, err error, format string, args ...any)
 }
 
-func (x XOps) mailboxID(ctx context.Context, tx store.Tx, mailboxID int64) store.Mailbox {
+func (x XOps) mailboxID(ctx context.Context, tx *bstore.Tx, mailboxID int64) store.Mailbox {
 	if mailboxID == 0 {
 		x.Checkuserf(ctx, errors.New("invalid zero mailbox ID"), "getting mailbox")
 	}
 	mb, err := store.MailboxID(tx, mailboxID)
-	if err == store.ErrAbsent || err == store.ErrMailboxExpunged {
+	if err == bstore.ErrAbsent || err == store.ErrMailboxExpunged {
 		x.Checkuserf(ctx, err, "getting mailbox")
 	}
 	x.Checkf(ctx, err, "getting mailbox")
@@ -41,13 +43,13 @@ func (x XOps) mailboxID(ctx context.Context, tx store.Tx, mailboxID int64) store
 }
 
 // messageID returns a non-expunged message or panics with a sherpa error.
-func (x XOps) messageID(ctx context.Context, tx store.Tx, messageID int64) store.Message {
+func (x XOps) messageID(ctx context.Context, tx *bstore.Tx, messageID int64) store.Message {
 	if messageID == 0 {
 		x.Checkuserf(ctx, errors.New("invalid zero message id"), "getting message")
 	}
 	m := store.Message{ID: messageID}
 	err := tx.Get(&m)
-	if err == store.ErrAbsent {
+	if err == bstore.ErrAbsent {
 		x.Checkuserf(ctx, ErrMessageNotFound, "getting message")
 	} else if err == nil && m.Expunged {
 		x.Checkuserf(ctx, errors.New("message was removed"), "getting message")
@@ -60,7 +62,7 @@ func (x XOps) MessageDelete(ctx context.Context, log mlog.Log, acc *store.Accoun
 	acc.WithWLock(func() {
 		var changes []store.Change
 
-		x.DBWrite(ctx, acc, func(tx store.Tx) {
+		x.DBWrite(ctx, acc, func(tx *bstore.Tx) {
 			var modseq store.ModSeq
 			changes = x.MessageDeleteTx(ctx, log, tx, acc, messageIDs, &modseq)
 		})
@@ -69,7 +71,7 @@ func (x XOps) MessageDelete(ctx context.Context, log mlog.Log, acc *store.Accoun
 	})
 }
 
-func (x XOps) MessageDeleteTx(ctx context.Context, log mlog.Log, tx store.Tx, acc *store.Account, messageIDs []int64, modseq *store.ModSeq) []store.Change {
+func (x XOps) MessageDeleteTx(ctx context.Context, log mlog.Log, tx *bstore.Tx, acc *store.Account, messageIDs []int64, modseq *store.ModSeq) []store.Change {
 	changes := make([]store.Change, 0, 1+1) // 1 remove, 1 mailbox counts, optimistic that all messages are in 1 mailbox.
 
 	var jf *junk.Filter
@@ -144,7 +146,7 @@ func (x XOps) MessageFlagsAdd(ctx context.Context, log mlog.Log, acc *store.Acco
 	acc.WithRLock(func() {
 		var changes []store.Change
 
-		x.DBWrite(ctx, acc, func(tx store.Tx) {
+		x.DBWrite(ctx, acc, func(tx *bstore.Tx) {
 			var modseq store.ModSeq
 			var retrain []store.Message
 			var mb, origmb store.Mailbox
@@ -221,7 +223,7 @@ func (x XOps) MessageFlagsClear(ctx context.Context, log mlog.Log, acc *store.Ac
 		var retrain []store.Message
 		var changes []store.Change
 
-		x.DBWrite(ctx, acc, func(tx store.Tx) {
+		x.DBWrite(ctx, acc, func(tx *bstore.Tx) {
 			var modseq store.ModSeq
 			var mb, origmb store.Mailbox
 
@@ -291,7 +293,7 @@ func (x XOps) MailboxesMarkRead(ctx context.Context, log mlog.Log, acc *store.Ac
 	acc.WithRLock(func() {
 		var changes []store.Change
 
-		x.DBWrite(ctx, acc, func(tx store.Tx) {
+		x.DBWrite(ctx, acc, func(tx *bstore.Tx) {
 			var modseq store.ModSeq
 
 			// Note: we don't need to retrain, changing the "seen" flag is not relevant.
@@ -300,7 +302,7 @@ func (x XOps) MailboxesMarkRead(ctx context.Context, log mlog.Log, acc *store.Ac
 				mb := x.mailboxID(ctx, tx, mbID)
 
 				// Find messages to update.
-				q := store.Query[store.Message](tx)
+				q := bstore.QueryTx[store.Message](tx)
 				q.FilterNonzero(store.Message{MailboxID: mb.ID})
 				q.FilterEqual("Seen", false)
 				q.FilterEqual("Expunged", false)
@@ -355,7 +357,7 @@ func (x XOps) MessageMove(ctx context.Context, log mlog.Log, acc *store.Account,
 			}
 		}()
 
-		x.DBWrite(ctx, acc, func(tx store.Tx) {
+		x.DBWrite(ctx, acc, func(tx *bstore.Tx) {
 			if mailboxName != "" {
 				mb, err := acc.MailboxFind(tx, mailboxName)
 				x.Checkf(ctx, err, "looking up mailbox name")
@@ -387,7 +389,7 @@ func (x XOps) MessageMove(ctx context.Context, log mlog.Log, acc *store.Account,
 // with new ID that is marked expunged in the original mailbox, along with a
 // MessageErase record so the message gets erased when all sessions stopped
 // referencing the message.
-func (x XOps) MessageMoveTx(ctx context.Context, log mlog.Log, acc *store.Account, tx store.Tx, messageIDs []int64, mbDst store.Mailbox, modseq *store.ModSeq) ([]int64, []store.Change) {
+func (x XOps) MessageMoveTx(ctx context.Context, log mlog.Log, acc *store.Account, tx *bstore.Tx, messageIDs []int64, mbDst store.Mailbox, modseq *store.ModSeq) ([]int64, []store.Change) {
 	var newIDs []int64
 	var commit bool
 	defer func() {

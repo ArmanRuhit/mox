@@ -64,6 +64,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
+	"github.com/mjl-/bstore"
 	"github.com/mjl-/flate"
 
 	"github.com/mjl-/mox/config"
@@ -484,16 +485,16 @@ func (c *conn) utf8strings() bool {
 	return c.enabled[capIMAP4rev2] || c.enabled[capUTF8Accept]
 }
 
-func (c *conn) xdbwrite(fn func(tx store.Tx)) {
-	err := c.account.DB.Write(context.TODO(), func(tx store.Tx) error {
+func (c *conn) xdbwrite(fn func(tx *bstore.Tx)) {
+	err := c.account.DB.Write(context.TODO(), func(tx *bstore.Tx) error {
 		fn(tx)
 		return nil
 	})
 	xcheckf(err, "transaction")
 }
 
-func (c *conn) xdbread(fn func(tx store.Tx)) {
-	err := c.account.DB.Read(context.TODO(), func(tx store.Tx) error {
+func (c *conn) xdbread(fn func(tx *bstore.Tx)) {
+	err := c.account.DB.Read(context.TODO(), func(tx *bstore.Tx) error {
 		fn(tx)
 		return nil
 	})
@@ -1095,7 +1096,7 @@ func (c *conn) tlsClientAuthVerifyPeerCertParsed(cert *x509.Certificate) error {
 	c.loginAttempt.TLSPubKeyFingerprint = fp
 	pubKey, err := store.TLSPublicKeyGet(context.TODO(), fp)
 	if err != nil {
-		if err == store.ErrAbsent {
+		if err == bstore.ErrAbsent {
 			c.loginAttempt.Result = store.AuthBadCredentials
 		}
 		return fmt.Errorf("looking up tls public key with fingerprint %s, subject %q, issuer %q: %v", fp, cert.Subject, cert.Issuer, err)
@@ -1547,7 +1548,7 @@ func slicesAny[T any](l []T) []any {
 // for interpretation of "*". If mailboxID is for the selected mailbox, the UIDs
 // visible in the session are taken into account. If there is no UID, 0 is
 // returned. If an error occurs, xerrfn is called, which should not return.
-func (c *conn) newCachedLastUID(tx store.Tx, mailboxID int64, xerrfn func(err error)) func() store.UID {
+func (c *conn) newCachedLastUID(tx *bstore.Tx, mailboxID int64, xerrfn func(err error)) func() store.UID {
 	var last store.UID
 	var have bool
 	return func() store.UID {
@@ -1562,7 +1563,7 @@ func (c *conn) newCachedLastUID(tx store.Tx, mailboxID int64, xerrfn func(err er
 				return c.uids[c.exists-1]
 			}
 		}
-		q := store.Query[store.Message](tx)
+		q := bstore.QueryTx[store.Message](tx)
 		q.FilterNonzero(store.Message{MailboxID: mailboxID})
 		q.FilterEqual("Expunged", false)
 		if c.mailboxID == mailboxID {
@@ -1571,7 +1572,7 @@ func (c *conn) newCachedLastUID(tx store.Tx, mailboxID int64, xerrfn func(err er
 		q.SortDesc("UID")
 		q.Limit(1)
 		m, err := q.Get()
-		if err == store.ErrAbsent {
+		if err == bstore.ErrAbsent {
 			have = true
 			return last
 		}
@@ -1587,7 +1588,7 @@ func (c *conn) newCachedLastUID(tx store.Tx, mailboxID int64, xerrfn func(err er
 
 // xnumSetEval evaluates nums to uids given the current session state and messages
 // in the selected mailbox. The returned UIDs are sorted, without duplicates.
-func (c *conn) xnumSetEval(tx store.Tx, isUID bool, nums numSet) []store.UID {
+func (c *conn) xnumSetEval(tx *bstore.Tx, isUID bool, nums numSet) []store.UID {
 	if nums.searchResult {
 		// UIDs that do not exist can be ignored.
 		if c.exists == 0 {
@@ -1599,7 +1600,7 @@ func (c *conn) xnumSetEval(tx store.Tx, isUID bool, nums numSet) []store.UID {
 		if c.uidonly {
 			var uids []store.UID
 			if len(c.searchResult) > 0 {
-				q := store.Query[store.Message](tx)
+				q := bstore.QueryTx[store.Message](tx)
 				q.FilterNonzero(store.Message{MailboxID: c.mailboxID})
 				q.FilterEqual("Expunged", false)
 				q.FilterEqual("UID", slicesAny(c.searchResult)...)
@@ -1673,7 +1674,7 @@ func (c *conn) xnumSetEval(tx store.Tx, isUID bool, nums numSet) []store.UID {
 	if c.uidonly {
 		xlastUID := c.newCachedLastUID(tx, c.mailboxID, func(xerr error) { xuserErrorf("%s", xerr) })
 		for _, r := range nums.xinterpretStar(xlastUID).ranges {
-			q := store.Query[store.Message](tx)
+			q := bstore.QueryTx[store.Message](tx)
 			q.FilterNonzero(store.Message{MailboxID: c.mailboxID})
 			q.FilterEqual("Expunged", false)
 			if r.last == nil {
@@ -1759,7 +1760,7 @@ func xcheckmailboxname(name string, allowInbox bool) string {
 // Lookup mailbox by name.
 // If the mailbox does not exist, panic is called with a user error.
 // Must be called with account rlock held.
-func (c *conn) xmailbox(tx store.Tx, name string, missingErrCode string) store.Mailbox {
+func (c *conn) xmailbox(tx *bstore.Tx, name string, missingErrCode string) store.Mailbox {
 	mb, err := c.account.MailboxFind(tx, name)
 	xcheckf(err, "finding mailbox")
 	if mb == nil {
@@ -1772,9 +1773,9 @@ func (c *conn) xmailbox(tx store.Tx, name string, missingErrCode string) store.M
 // Lookup mailbox by ID.
 // If the mailbox does not exist, panic is called with a user error.
 // Must be called with account rlock held.
-func (c *conn) xmailboxID(tx store.Tx, id int64) store.Mailbox {
+func (c *conn) xmailboxID(tx *bstore.Tx, id int64) store.Mailbox {
 	mb, err := store.MailboxID(tx, id)
-	if err == store.ErrAbsent {
+	if err == bstore.ErrAbsent {
 		xuserErrorf("%w", store.ErrUnknownMailbox)
 	} else if err == store.ErrMailboxExpunged {
 		// ../rfc/9051:5140
@@ -2012,14 +2013,14 @@ func (c *conn) xapplyChangesNotify(changes []store.Change, sendDelayed bool) {
 
 	// Prepare for providing a read-only transaction on first-use, for MessageNew fetch
 	// attributes.
-	var tx store.Tx
+	var tx *bstore.Tx
 	defer func() {
 		if tx != nil {
 			err := tx.Rollback()
 			c.log.Check(err, "rolling back tx")
 		}
 	}()
-	xtx := func() store.Tx {
+	xtx := func() *bstore.Tx {
 		if tx != nil {
 			return tx
 		}
@@ -2749,9 +2750,9 @@ func (c *conn) cmdAuthenticate(tag, cmd string, p *parser) {
 		}
 		var ipadhash, opadhash hash.Hash
 		account.WithRLock(func() {
-			err := account.DB.Read(context.TODO(), func(tx store.Tx) error {
-				password, err := store.Query[store.Password](tx).Get()
-				if err == store.ErrAbsent {
+			err := account.DB.Read(context.TODO(), func(tx *bstore.Tx) error {
+				password, err := bstore.QueryTx[store.Password](tx).Get()
+				if err == bstore.ErrAbsent {
 					c.log.Info("failed authentication attempt", slog.String("username", username), slog.Any("remote", c.remoteIP))
 					xusercodeErrorf("AUTHENTICATIONFAILED", "bad credentials")
 				}
@@ -2829,9 +2830,9 @@ func (c *conn) cmdAuthenticate(tag, cmd string, p *parser) {
 		}
 		var xscram store.SCRAM
 		account.WithRLock(func() {
-			err := account.DB.Read(context.TODO(), func(tx store.Tx) error {
-				password, err := store.Query[store.Password](tx).Get()
-				if err == store.ErrAbsent {
+			err := account.DB.Read(context.TODO(), func(tx *bstore.Tx) error {
+				password, err := bstore.QueryTx[store.Password](tx).Get()
+				if err == bstore.ErrAbsent {
 					c.log.Info("failed authentication attempt", slog.String("username", username), slog.Any("remote", c.remoteIP))
 					xusercodeErrorf("AUTHENTICATIONFAILED", "bad credentials")
 				}
@@ -3141,7 +3142,7 @@ func (c *conn) cmdEnable(tag, cmd string, p *parser) {
 // If a mailbox is selected, an untagged OK with HIGHESTMODSEQ is written to the
 // client. If tx is non-nil, it is used to read the HIGHESTMODSEQ from the
 // database. Otherwise a new read-only transaction is created.
-func (c *conn) xensureCondstore(tx store.Tx) {
+func (c *conn) xensureCondstore(tx *bstore.Tx) {
 	if !c.enabled[capCondstore] {
 		c.enabled[capCondstore] = true
 		// todo spec: can we send an untagged enabled response?
@@ -3152,7 +3153,7 @@ func (c *conn) xensureCondstore(tx store.Tx) {
 
 		var mb store.Mailbox
 		if tx == nil {
-			c.xdbread(func(tx store.Tx) {
+			c.xdbread(func(tx *bstore.Tx) {
 				mb = c.xmailboxID(tx, c.mailboxID)
 			})
 		} else {
@@ -3258,7 +3259,7 @@ func (c *conn) cmdSelectExamine(isselect bool, tag, cmd string, p *parser) {
 
 	var mb store.Mailbox
 	c.account.WithRLock(func() {
-		c.xdbread(func(tx store.Tx) {
+		c.xdbread(func(tx *bstore.Tx) {
 			mb = c.xmailbox(tx, name, "")
 
 			var firstUnseen msgseq = 0
@@ -3269,7 +3270,7 @@ func (c *conn) cmdSelectExamine(isselect bool, tag, cmd string, p *parser) {
 			} else {
 				c.uids = []store.UID{}
 
-				q := store.Query[store.Message](tx)
+				q := bstore.QueryTx[store.Message](tx)
 				q.FilterNonzero(store.Message{MailboxID: mb.ID})
 				q.FilterEqual("Expunged", false)
 				q.SortAsc("UID")
@@ -3362,7 +3363,7 @@ func (c *conn) cmdSelectExamine(isselect bool, tag, cmd string, p *parser) {
 					// The client sent a UID that is now removed. This is typically fine. But we check
 					// that it is consistent with the modseq the client sent. If the UID already didn't
 					// exist at that modseq, the client may be missing some information.
-					q := store.Query[store.Message](tx)
+					q := bstore.QueryTx[store.Message](tx)
 					q.FilterNonzero(store.Message{MailboxID: mb.ID, UID: oldClientUID})
 					m, err := q.Get()
 					if err == nil {
@@ -3375,12 +3376,12 @@ func (c *conn) cmdSelectExamine(isselect bool, tag, cmd string, p *parser) {
 							qrknownUIDs = nil
 							c.xbwritelinef("* OK [ALERT] Synchronization inconsistency in client detected. Client tried to sync with a UID that was removed at or after the MODSEQ it sent in the request. Sending all historic message removals for selected mailbox. Full synchronization recommended.")
 						}
-					} else if err != store.ErrAbsent {
+					} else if err != bstore.ErrAbsent {
 						xcheckf(err, "checking old client uid")
 					}
 				}
 
-				q := store.Query[store.Message](tx)
+				q := bstore.QueryTx[store.Message](tx)
 				q.FilterNonzero(store.Message{MailboxID: mb.ID})
 				// Note: we don't filter by Expunged.
 				q.FilterGreater("ModSeq", store.ModSeqFromClient(qrmodseq))
@@ -3426,7 +3427,7 @@ func (c *conn) cmdSelectExamine(isselect bool, tag, cmd string, p *parser) {
 						for _, r := range qrknownUIDs.xinterpretStar(func() store.UID { return 0 }).ranges {
 							// Gather UIDs for this range.
 							var uids []store.UID
-							q := store.Query[store.Message](tx)
+							q := bstore.QueryTx[store.Message](tx)
 							q.FilterNonzero(store.Message{MailboxID: mb.ID})
 							q.FilterEqual("Expunged", false)
 							if r.last == nil {
@@ -3551,7 +3552,7 @@ func (c *conn) cmdCreate(tag, cmd string, p *parser) {
 	var created []string // Created mailbox names.
 
 	c.account.WithWLock(func() {
-		c.xdbwrite(func(tx store.Tx) {
+		c.xdbwrite(func(tx *bstore.Tx) {
 			var exists bool
 			var err error
 			_, changes, created, exists, err = c.account.MailboxCreate(tx, name, specialUse)
@@ -3595,7 +3596,7 @@ func (c *conn) cmdDelete(tag, cmd string, p *parser) {
 		var mb store.Mailbox
 		var changes []store.Change
 
-		c.xdbwrite(func(tx store.Tx) {
+		c.xdbwrite(func(tx *bstore.Tx) {
 			mb = c.xmailbox(tx, name, "NONEXISTENT")
 
 			var hasChildren bool
@@ -3647,7 +3648,7 @@ func (c *conn) cmdRename(tag, cmd string, p *parser) {
 	c.account.WithWLock(func() {
 		var changes []store.Change
 
-		c.xdbwrite(func(tx store.Tx) {
+		c.xdbwrite(func(tx *bstore.Tx) {
 			mbSrc := c.xmailbox(tx, src, "NONEXISTENT")
 
 			// Handle common/simple case first.
@@ -3682,7 +3683,7 @@ func (c *conn) cmdRename(tag, cmd string, p *parser) {
 			changes = chl
 
 			// Copy mailbox annotations. ../rfc/5464:368
-			qa := store.Query[store.Annotation](tx)
+			qa := bstore.QueryTx[store.Annotation](tx)
 			qa.FilterNonzero(store.Annotation{MailboxID: mbSrc.ID})
 			qa.FilterEqual("Expunged", false)
 			annotations, err := qa.List()
@@ -3699,7 +3700,7 @@ func (c *conn) cmdRename(tag, cmd string, p *parser) {
 			c.xcheckMetadataSize(tx)
 
 			// Build query that selects messages to move.
-			q := store.Query[store.Message](tx)
+			q := bstore.QueryTx[store.Message](tx)
 			q.FilterNonzero(store.Message{MailboxID: mbSrc.ID})
 			q.FilterEqual("Expunged", false)
 			q.SortAsc("UID")
@@ -3736,7 +3737,7 @@ func (c *conn) cmdSubscribe(tag, cmd string, p *parser) {
 	c.account.WithWLock(func() {
 		var changes []store.Change
 
-		c.xdbwrite(func(tx store.Tx) {
+		c.xdbwrite(func(tx *bstore.Tx) {
 			var err error
 			changes, err = c.account.SubscriptionEnsure(tx, name)
 			xcheckf(err, "ensuring subscription")
@@ -3765,10 +3766,10 @@ func (c *conn) cmdUnsubscribe(tag, cmd string, p *parser) {
 	c.account.WithWLock(func() {
 		var changes []store.Change
 
-		c.xdbwrite(func(tx store.Tx) {
+		c.xdbwrite(func(tx *bstore.Tx) {
 			// It's OK if not currently subscribed, ../rfc/9051:2215
 			err := tx.Delete(&store.Subscription{Name: name})
-			if err == store.ErrAbsent {
+			if err == bstore.ErrAbsent {
 				exists, err := c.account.MailboxExists(tx, name)
 				xcheckf(err, "checking if mailbox exists")
 				if !exists {
@@ -3814,8 +3815,8 @@ func (c *conn) cmdLsub(tag, cmd string, p *parser) {
 	re := xmailboxPatternMatcher(ref, []string{pattern})
 
 	var lines []string
-	c.xdbread(func(tx store.Tx) {
-		q := store.Query[store.Subscription](tx)
+	c.xdbread(func(tx *bstore.Tx) {
+		q := bstore.QueryTx[store.Subscription](tx)
 		q.SortAsc("Name")
 		subscriptions, err := q.List()
 		xcheckf(err, "querying subscriptions")
@@ -3843,7 +3844,7 @@ func (c *conn) cmdLsub(tag, cmd string, p *parser) {
 		if !ispercent {
 			return
 		}
-		qmb := store.Query[store.Mailbox](tx)
+		qmb := bstore.QueryTx[store.Mailbox](tx)
 		qmb.FilterEqual("Expunged", false)
 		qmb.SortAsc("Name")
 		err = qmb.ForEach(func(mb store.Mailbox) error {
@@ -3908,7 +3909,7 @@ func (c *conn) cmdStatus(tag, cmd string, p *parser) {
 
 	var responseLine string
 	c.account.WithRLock(func() {
-		c.xdbread(func(tx store.Tx) {
+		c.xdbread(func(tx *bstore.Tx) {
 			mb = c.xmailbox(tx, name, "")
 			responseLine = c.xstatusLine(tx, mb, attrs)
 		})
@@ -3919,7 +3920,7 @@ func (c *conn) cmdStatus(tag, cmd string, p *parser) {
 }
 
 // Response syntax: ../rfc/9051:6681 ../rfc/9051:7070 ../rfc/9051:7059 ../rfc/3501:4834 ../rfc/9208:712
-func (c *conn) xstatusLine(tx store.Tx, mb store.Mailbox, attrs []string) string {
+func (c *conn) xstatusLine(tx *bstore.Tx, mb store.Mailbox, attrs []string) string {
 	status := []string{}
 	for _, a := range attrs {
 		A := strings.ToUpper(a)
@@ -4030,7 +4031,7 @@ func (c *conn) cmdAppend(tag, cmd string, p *parser) {
 	var totalSize int64
 	if !quotaUnlimited {
 		c.account.WithRLock(func() {
-			c.xdbread(func(tx store.Tx) {
+			c.xdbread(func(tx *bstore.Tx) {
 				du := store.DiskUsage{ID: 1}
 				err := tx.Get(&du)
 				xcheckf(err, "get quota disk usage")
@@ -4086,7 +4087,7 @@ func (c *conn) cmdAppend(tag, cmd string, p *parser) {
 			// Check for mailbox on first iteration.
 			if len(appends) <= 1 {
 				name = xcheckmailboxname(name, true)
-				c.xdbread(func(tx store.Tx) {
+				c.xdbread(func(tx *bstore.Tx) {
 					c.xmailbox(tx, name, "TRYCREATE")
 				})
 			}
@@ -4174,7 +4175,7 @@ func (c *conn) cmdAppend(tag, cmd string, p *parser) {
 	c.account.WithWLock(func() {
 		var changes []store.Change
 
-		c.xdbwrite(func(tx store.Tx) {
+		c.xdbwrite(func(tx *bstore.Tx) {
 			mb = c.xmailbox(tx, name, "TRYCREATE")
 
 			nkeywords := len(mb.Keywords)
@@ -4344,7 +4345,7 @@ func (c *conn) cmdGetquotaroot(tag, cmd string, p *parser) {
 	c.account.WithRLock(func() {
 		quota = c.account.QuotaMessageSize()
 		if quota >= 0 {
-			c.xdbread(func(tx store.Tx) {
+			c.xdbread(func(tx *bstore.Tx) {
 				du := store.DiskUsage{ID: 1}
 				err := tx.Get(&du)
 				xcheckf(err, "gather used quota")
@@ -4386,7 +4387,7 @@ func (c *conn) cmdGetquota(tag, cmd string, p *parser) {
 	c.account.WithRLock(func() {
 		quota = c.account.QuotaMessageSize()
 		if quota > 0 {
-			c.xdbread(func(tx store.Tx) {
+			c.xdbread(func(tx *bstore.Tx) {
 				du := store.DiskUsage{ID: 1}
 				err := tx.Get(&du)
 				xcheckf(err, "gather used quota")
@@ -4414,7 +4415,7 @@ func (c *conn) cmdCheck(tag, cmd string, p *parser) {
 	p.xempty()
 
 	c.account.WithRLock(func() {
-		c.xdbread(func(tx store.Tx) {
+		c.xdbread(func(tx *bstore.Tx) {
 			c.xmailboxID(tx, c.mailboxID) // Validate.
 		})
 	})
@@ -4453,9 +4454,9 @@ func (c *conn) xexpunge(uidSet *numSet, missingMailboxOK bool) (expunged []store
 	c.account.WithWLock(func() {
 		var changes []store.Change
 
-		c.xdbwrite(func(tx store.Tx) {
+		c.xdbwrite(func(tx *bstore.Tx) {
 			mb, err := store.MailboxID(tx, c.mailboxID)
-			if err == store.ErrAbsent || err == store.ErrMailboxExpunged {
+			if err == bstore.ErrAbsent || err == store.ErrMailboxExpunged {
 				if missingMailboxOK {
 					return
 				}
@@ -4466,7 +4467,7 @@ func (c *conn) xexpunge(uidSet *numSet, missingMailboxOK bool) (expunged []store
 
 			xlastUID := c.newCachedLastUID(tx, c.mailboxID, func(err error) { xuserErrorf("%s", err) })
 
-			qm := store.Query[store.Message](tx)
+			qm := bstore.QueryTx[store.Message](tx)
 			qm.FilterNonzero(store.Message{MailboxID: c.mailboxID})
 			qm.FilterEqual("Deleted", true)
 			qm.FilterEqual("Expunged", false)
@@ -4656,7 +4657,7 @@ func (c *conn) cmdUIDReplace(tag, cmd string, p *parser) {
 	c.cmdxReplace(true, tag, cmd, p)
 }
 
-func (c *conn) gatherCopyMoveUIDs(tx store.Tx, isUID bool, nums numSet) []store.UID {
+func (c *conn) gatherCopyMoveUIDs(tx *bstore.Tx, isUID bool, nums numSet) []store.UID {
 	// Gather uids, then sort so we can return a consistently simple and hard to
 	// misinterpret COPYUID/MOVEUID response. It seems safer to have UIDs in ascending
 	// order, because requested uid set of 12:10 is equal to 10:12, so if we would just
@@ -4704,7 +4705,7 @@ func (c *conn) cmdxCopy(isUID bool, tag, cmd string, p *parser) {
 
 	c.account.WithWLock(func() {
 
-		c.xdbwrite(func(tx store.Tx) {
+		c.xdbwrite(func(tx *bstore.Tx) {
 			mbSrc := c.xmailboxID(tx, c.mailboxID) // Validate.
 
 			mbDst = c.xmailbox(tx, name, "TRYCREATE")
@@ -4735,7 +4736,7 @@ func (c *conn) cmdxCopy(isUID bool, tag, cmd string, p *parser) {
 			xcheckf(err, "adding uid")
 
 			// Fetch messages from database.
-			q := store.Query[store.Message](tx)
+			q := bstore.QueryTx[store.Message](tx)
 			q.FilterNonzero(store.Message{MailboxID: c.mailboxID})
 			q.FilterEqual("UID", slicesAny(uids)...)
 			q.FilterEqual("Expunged", false)
@@ -4806,7 +4807,7 @@ func (c *conn) cmdxCopy(isUID bool, tag, cmd string, p *parser) {
 					mbKeywords[kw] = struct{}{}
 				}
 
-				qmr := store.Query[store.Recipient](tx)
+				qmr := bstore.QueryTx[store.Recipient](tx)
 				qmr.FilterNonzero(store.Recipient{MessageID: origID})
 				mrs, err := qmr.List()
 				xcheckf(err, "listing message recipients")
@@ -4916,7 +4917,7 @@ func (c *conn) cmdxMove(isUID bool, tag, cmd string, p *parser) {
 	c.account.WithWLock(func() {
 		var changes []store.Change
 
-		c.xdbwrite(func(tx store.Tx) {
+		c.xdbwrite(func(tx *bstore.Tx) {
 			mbSrc := c.xmailboxID(tx, c.mailboxID) // Validate.
 			mbDst = c.xmailbox(tx, name, "TRYCREATE")
 			if mbDst.ID == c.mailboxID {
@@ -4937,7 +4938,7 @@ func (c *conn) cmdxMove(isUID bool, tag, cmd string, p *parser) {
 			xcheckf(err, "assigning next modseq")
 
 			// Make query selecting messages to move.
-			q := store.Query[store.Message](tx)
+			q := bstore.QueryTx[store.Message](tx)
 			q.FilterNonzero(store.Message{MailboxID: mbSrc.ID})
 			q.FilterEqual("UID", slicesAny(uids)...)
 			q.FilterEqual("Expunged", false)
@@ -4991,7 +4992,7 @@ func (c *conn) cmdxMove(isUID bool, tag, cmd string, p *parser) {
 }
 
 // q must yield messages from a single mailbox.
-func (c *conn) xmoveMessages(tx store.Tx, q *store.TypedQuery[store.Message], expectCount int, modseq store.ModSeq, mbSrc, mbDst *store.Mailbox) (newIDs []int64, changes []store.Change) {
+func (c *conn) xmoveMessages(tx *bstore.Tx, q *bstore.Query[store.Message], expectCount int, modseq store.ModSeq, mbSrc, mbDst *store.Mailbox) (newIDs []int64, changes []store.Change) {
 	newIDs = make([]int64, 0, expectCount)
 	var commit bool
 	defer func() {
@@ -5204,7 +5205,7 @@ func (c *conn) cmdxStore(isUID bool, tag, cmd string, p *parser) {
 		var mbKwChanged bool
 		var changes []store.Change
 
-		c.xdbwrite(func(tx store.Tx) {
+		c.xdbwrite(func(tx *bstore.Tx) {
 			mb = c.xmailboxID(tx, c.mailboxID) // Validate.
 			origmb = mb
 
@@ -5223,7 +5224,7 @@ func (c *conn) cmdxStore(isUID bool, tag, cmd string, p *parser) {
 				}
 			}
 
-			q := store.Query[store.Message](tx)
+			q := bstore.QueryTx[store.Message](tx)
 			q.FilterNonzero(store.Message{MailboxID: c.mailboxID})
 			q.FilterEqual("UID", slicesAny(uids)...)
 			q.FilterEqual("Expunged", false)

@@ -41,6 +41,7 @@ import (
 
 	"github.com/mjl-/adns"
 
+	"github.com/mjl-/bstore"
 	"github.com/mjl-/sherpa"
 	"github.com/mjl-/sherpadoc"
 	"github.com/mjl-/sherpaprom"
@@ -1626,7 +1627,7 @@ func (Admin) Account(ctx context.Context, account string) (accountConfig config.
 	acc.WithRLock(func() {
 		ac, _ = mox.Conf.Account(acc.Name)
 
-		err := acc.DB.Read(ctx, func(tx store.Tx) error {
+		err := acc.DB.Read(ctx, func(tx *bstore.Tx) error {
 			du := store.DiskUsage{ID: 1}
 			err := tx.Get(&du)
 			diskUsage = du.MessageSize
@@ -1682,9 +1683,9 @@ func (Admin) TLSReports(ctx context.Context, start, end time.Time, policyDomain 
 func (Admin) TLSReportID(ctx context.Context, domain string, reportID int64) tlsrptdb.Record {
 	record, err := tlsrptdb.RecordID(ctx, reportID)
 	if err == nil && record.Domain != domain {
-		err = store.ErrAbsent
+		err = bstore.ErrAbsent
 	}
-	if err == store.ErrAbsent {
+	if err == bstore.ErrAbsent {
 		xcheckuserf(ctx, err, "fetching tls report from database")
 	}
 	xcheckf(ctx, err, "fetching tls report from database")
@@ -1763,9 +1764,9 @@ func (Admin) DMARCReports(ctx context.Context, start, end time.Time, domain stri
 func (Admin) DMARCReportID(ctx context.Context, domain string, reportID int64) (report dmarcdb.DomainFeedback) {
 	report, err := dmarcdb.RecordID(ctx, reportID)
 	if err == nil && report.Domain != domain {
-		err = store.ErrAbsent
+		err = bstore.ErrAbsent
 	}
-	if err == store.ErrAbsent {
+	if err == bstore.ErrAbsent {
 		xcheckuserf(ctx, err, "fetching dmarc aggregate report from database")
 	}
 	xcheckf(ctx, err, "fetching dmarc aggregate report from database")

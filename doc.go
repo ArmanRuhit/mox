@@ -135,7 +135,14 @@ any parameters. Followed by the help and usage information for each command.
 
 # mox serve
 
-Start mox, serving SMTP/IMAP/HTTPS. Not implemented on windows.
+Start mox, serving SMTP/IMAP/HTTPS.
+
+Incoming email is accepted over SMTP. Email can be retrieved by users using
+IMAP. HTTP listeners are started for the admin/account web interfaces, and for
+automated TLS configuration. Missing essential TLS certificates are immediately
+requested, other TLS certificates are requested on demand.
+
+Only implemented on unix systems, not Windows.
 
 	usage: mox serve
 
@@ -803,7 +810,7 @@ during those commands instead of during "data".
 
 	usage: mox localserve
 	  -dir string
-	    	configuration storage directory (default "$userconfigdir\\mox-localserve")
+	    	configuration storage directory (default "$userconfigdir/mox-localserve")
 	  -initonly
 	    	write configuration files and exit
 	  -ip string

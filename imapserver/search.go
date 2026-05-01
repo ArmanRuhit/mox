@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mjl-/bstore"
+
 	"github.com/mjl-/mox/message"
 	"github.com/mjl-/mox/store"
 )
@@ -190,7 +192,7 @@ func (c *conn) cmdxSearch(isUID, isE bool, tag, cmd string, p *parser) {
 		inProgressTag = dquote(tag).pack(c)
 	}
 
-	c.xdbread(func(tx store.Tx) {
+	c.xdbread(func(tx *bstore.Tx) {
 		// Gather mailboxes to operate on. Usually just the selected mailbox. But with the
 		// ESEARCH command, we may be searching multiple.
 		var mailboxes []store.Mailbox
@@ -213,7 +215,7 @@ func (c *conn) cmdxSearch(isUID, isE bool, tag, cmd string, p *parser) {
 					// mailboxes from the destinations, and all from the rulesets except when
 					// ListAllowDomain is non-empty.
 					// ../rfc/5465:822
-					q := store.Query[store.Mailbox](tx)
+					q := bstore.QueryTx[store.Mailbox](tx)
 					q.FilterEqual("Expunged", false)
 					q.FilterGreaterEqual("Name", "Inbox")
 					q.SortAsc("Name")
@@ -251,7 +253,7 @@ func (c *conn) cmdxSearch(isUID, isE bool, tag, cmd string, p *parser) {
 				case mbspecPersonal:
 					// All mailboxes in the personal namespace. Which is all mailboxes for us.
 					// ../rfc/5465:817
-					for mb, err := range store.Query[store.Mailbox](tx).FilterEqual("Expunged", false).All() {
+					for mb, err := range bstore.QueryTx[store.Mailbox](tx).FilterEqual("Expunged", false).All() {
 						xcheckf(err, "list mailboxes")
 						m[mb.ID] = mb
 					}
@@ -260,11 +262,11 @@ func (c *conn) cmdxSearch(isUID, isE bool, tag, cmd string, p *parser) {
 					// Mailboxes that are subscribed. Will typically be same as personal, since we
 					// subscribe to all mailboxes. But user can manage subscriptions differently.
 					// ../rfc/5465:831
-					for mb, err := range store.Query[store.Mailbox](tx).FilterEqual("Expunged", false).All() {
+					for mb, err := range bstore.QueryTx[store.Mailbox](tx).FilterEqual("Expunged", false).All() {
 						xcheckf(err, "list mailboxes")
 						if err := tx.Get(&store.Subscription{Name: mb.Name}); err == nil {
 							m[mb.ID] = mb
-						} else if err != store.ErrAbsent {
+						} else if err != bstore.ErrAbsent {
 							xcheckf(err, "lookup subscription for mailbox")
 						}
 					}
@@ -286,7 +288,7 @@ func (c *conn) cmdxSearch(isUID, isE bool, tag, cmd string, p *parser) {
 							ntoken = len(strings.Split(name, "/")) + 1
 						}
 
-						q := store.Query[store.Mailbox](tx)
+						q := bstore.QueryTx[store.Mailbox](tx)
 						q.FilterEqual("Expunged", false)
 						q.FilterGreaterEqual("Name", name)
 						q.SortAsc("Name")
@@ -386,7 +388,7 @@ func (c *conn) cmdxSearch(isUID, isE bool, tag, cmd string, p *parser) {
 					return cachedHighestUID
 				}
 
-				q := store.Query[store.Message](tx)
+				q := bstore.QueryTx[store.Message](tx)
 				q.FilterNonzero(store.Message{MailboxID: mb.ID})
 				q.FilterEqual("Expunged", false)
 				if mb.ID == c.mailboxID {
@@ -395,7 +397,7 @@ func (c *conn) cmdxSearch(isUID, isE bool, tag, cmd string, p *parser) {
 				q.SortDesc("UID")
 				q.Limit(1)
 				m, err := q.Get()
-				if err == store.ErrAbsent {
+				if err == bstore.ErrAbsent {
 					xuserErrorf("cannot use * on empty mailbox")
 				}
 				xcheckf(err, "get last uid")
@@ -410,7 +412,7 @@ func (c *conn) cmdxSearch(isUID, isE bool, tag, cmd string, p *parser) {
 				// sequence number for this session up if we are searching the selected mailbox.
 				var seq msgseq = 1
 
-				q := store.Query[store.Message](tx)
+				q := bstore.QueryTx[store.Message](tx)
 				q.FilterNonzero(store.Message{MailboxID: mb.ID})
 				q.FilterEqual("Expunged", false)
 				if mb.ID == c.mailboxID {
@@ -452,7 +454,7 @@ func (c *conn) cmdxSearch(isUID, isE bool, tag, cmd string, p *parser) {
 			// And reverse search for MAX if we have only MAX or MAX combined with MIN, and
 			// don't need sequence numbers. We just need a single match, then we stop.
 			if reverse {
-				q := store.Query[store.Message](tx)
+				q := bstore.QueryTx[store.Message](tx)
 				q.FilterNonzero(store.Message{MailboxID: mb.ID})
 				q.FilterEqual("Expunged", false)
 				q.FilterGreater("UID", lastUID)
@@ -596,7 +598,7 @@ func (c *conn) cmdxSearch(isUID, isE bool, tag, cmd string, p *parser) {
 
 type search struct {
 	c           *conn
-	tx          store.Tx
+	tx          *bstore.Tx
 	msgCount    uint32 // Number of messages in mailbox (or session when selected).
 	seq         msgseq // Can be 0, for other mailboxes than selected in case of MAX.
 	m           store.Message
@@ -605,7 +607,7 @@ type search struct {
 	xhighestUID func() store.UID
 }
 
-func (c *conn) searchMatch(tx store.Tx, msgCount uint32, seq msgseq, m store.Message, sk searchKey, bodySearch, textSearch *store.WordSearch, xhighestUID func() store.UID) bool {
+func (c *conn) searchMatch(tx *bstore.Tx, msgCount uint32, seq msgseq, m store.Message, sk searchKey, bodySearch, textSearch *store.WordSearch, xhighestUID func() store.UID) bool {
 	if m.MailboxID == c.mailboxID {
 		// If session doesn't know about the message yet, don't return it.
 		if c.uidonly {

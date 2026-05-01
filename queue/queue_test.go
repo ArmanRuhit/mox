@@ -172,7 +172,7 @@ func TestQueue(t *testing.T) {
 	}
 
 	// Fail a message, check the account has a message afterwards, the DSN.
-	n, err = store.QueryDB[store.Message](ctxbg, acc.DB).Count()
+	n, err = bstore.QueryDB[store.Message](ctxbg, acc.DB).Count()
 	tcheck(t, err, "count messages in account")
 	tcompare(t, n, 0)
 	n, err = Fail(ctxbg, pkglog, Filter{IDs: []int64{msgs[2].ID}})
@@ -180,7 +180,7 @@ func TestQueue(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("failed %d, expected 1", n)
 	}
-	n, err = store.QueryDB[store.Message](ctxbg, acc.DB).Count()
+	n, err = bstore.QueryDB[store.Message](ctxbg, acc.DB).Count()
 	tcheck(t, err, "count messages in account")
 	tcompare(t, n, 1)
 
@@ -257,7 +257,7 @@ func TestQueue(t *testing.T) {
 	select {
 	case <-deliveryResults:
 		tcompare(t, ndial, 1)
-		m, err := store.QueryDB[Msg](ctxbg, DB).Get()
+		m, err := bstore.QueryDB[Msg](ctxbg, DB).Get()
 		tcheck(t, err, "get")
 		tcompare(t, m.Attempts, 1)
 	case <-timer.C:
@@ -266,7 +266,7 @@ func TestQueue(t *testing.T) {
 
 	// OpenMessage.
 	_, err = OpenMessage(ctxbg, msg.ID+1)
-	if err != store.ErrAbsent {
+	if err != bstore.ErrAbsent {
 		t.Fatalf("OpenMessage, got %v, expected ErrAbsent", err)
 	}
 	reader, err := OpenMessage(ctxbg, msg.ID)
@@ -512,10 +512,10 @@ func TestQueue(t *testing.T) {
 			smtpclient.DialHook = nil
 		}()
 
-		inbox, err := store.QueryDB[store.Mailbox](ctxbg, acc.DB).FilterNonzero(store.Mailbox{Name: "Inbox"}).Get()
+		inbox, err := bstore.QueryDB[store.Mailbox](ctxbg, acc.DB).FilterNonzero(store.Mailbox{Name: "Inbox"}).Get()
 		tcheck(t, err, "get inbox")
 
-		inboxCount, err := store.QueryDB[store.Message](ctxbg, acc.DB).FilterNonzero(store.Message{MailboxID: inbox.ID}).Count()
+		inboxCount, err := bstore.QueryDB[store.Message](ctxbg, acc.DB).FilterNonzero(store.Message{MailboxID: inbox.ID}).Count()
 		tcheck(t, err, "querying messages in inbox")
 
 		launchWork(pkglog, resolver, map[string]struct{}{})
@@ -536,7 +536,7 @@ func TestQueue(t *testing.T) {
 		tcompare(t, len(xmsgs), 0)
 
 		// And that we possibly got a DSN delivered.
-		ninbox, err := store.QueryDB[store.Message](ctxbg, acc.DB).FilterNonzero(store.Message{MailboxID: inbox.ID}).Count()
+		ninbox, err := bstore.QueryDB[store.Message](ctxbg, acc.DB).FilterNonzero(store.Message{MailboxID: inbox.ID}).Count()
 		tcheck(t, err, "querying messages in inbox")
 		if expectDSN && ninbox != inboxCount+1 {
 			t.Fatalf("got %d messages in inbox, previously %d, expected 1 additional for dsn", ninbox, inboxCount)
@@ -903,7 +903,7 @@ func TestQueue(t *testing.T) {
 	go deliver(pkglog, resolver, msg)
 	<-deliveryResults
 	err = DB.Get(ctxbg, &msg)
-	if err != store.ErrAbsent {
+	if err != bstore.ErrAbsent {
 		t.Fatalf("attempt to fetch delivered and removed message from queue, got err %v, expected ErrAbsent", err)
 	}
 
@@ -979,9 +979,9 @@ func TestRetiredHooks(t *testing.T) {
 	testAction := func(account string, action func(), expResult *MsgResult, expEvent string, expSuppressing bool) {
 		t.Helper()
 
-		_, err := store.QueryDB[MsgRetired](ctxbg, DB).Delete()
+		_, err := bstore.QueryDB[MsgRetired](ctxbg, DB).Delete()
 		tcheck(t, err, "clearing retired messages")
-		_, err = store.QueryDB[Hook](ctxbg, DB).Delete()
+		_, err = bstore.QueryDB[Hook](ctxbg, DB).Delete()
 		tcheck(t, err, "clearing hooks")
 
 		qm := MakeMsg(path, path, false, false, int64(len(testmsg)), "<test@localhost>", nil, nil, time.Now(), "test")
@@ -1420,7 +1420,7 @@ func TestListFilterSort(t *testing.T) {
 
 	// Retire messages and do similar but more basic tests. The code is similar.
 	var mrl []MsgRetired
-	err = DB.Write(ctxbg, func(tx store.Tx) error {
+	err = DB.Write(ctxbg, func(tx *bstore.Tx) error {
 		for _, m := range qml {
 			mr := m.Retired(false, m.NextAttempt, time.Now().Add(time.Minute).Round(0))
 			err := tx.Insert(&mr)

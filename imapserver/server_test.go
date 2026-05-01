@@ -19,6 +19,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/mjl-/bstore"
+
 	"github.com/mjl-/mox/imapclient"
 	"github.com/mjl-/mox/mlog"
 	"github.com/mjl-/mox/mox-"
@@ -490,7 +492,7 @@ func startArgsMore(t *testing.T, uidonly, first, immediateTLS bool, serverConfig
 	}
 	if first {
 		// Add a deleted mailbox, may excercise some code paths.
-		err = acc.DB.Write(ctxbg, func(tx store.Tx) error {
+		err = acc.DB.Write(ctxbg, func(tx *bstore.Tx) error {
 			// todo: add a message to inbox and remove it again. need to change all uids in the tests.
 			// todo: add tests for operating on an expunged mailbox. it should say it doesn't exist.
 

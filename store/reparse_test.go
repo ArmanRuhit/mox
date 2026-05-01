@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mjl-/bstore"
+
 	"github.com/mjl-/mox/message"
 	"github.com/mjl-/mox/mlog"
 	"github.com/mjl-/mox/mox-"
@@ -64,7 +66,7 @@ func TestReparse(t *testing.T) {
 	tcompare(t, total, 10)
 
 	// Ensure a next reopen will reparse messages in the background.
-	_, err = QueryDB[Upgrade](ctxbg, acc.DB).UpdateNonzero(Upgrade{MessageParseVersion: MessageParseVersionLatest + 1})
+	_, err = bstore.QueryDB[Upgrade](ctxbg, acc.DB).UpdateNonzero(Upgrade{MessageParseVersion: MessageParseVersionLatest + 1})
 	tcheck(t, err, "change")
 
 	// Close account, and wait until really closed.
@@ -84,7 +86,7 @@ func TestReparse(t *testing.T) {
 	acc, err = OpenAccount(log, "mjl", false)
 	tcheck(t, err, "open account")
 	for range 10 {
-		up, err := QueryDB[Upgrade](ctxbg, acc.DB).Get()
+		up, err := bstore.QueryDB[Upgrade](ctxbg, acc.DB).Get()
 		tcheck(t, err, "change")
 		if up.MessageParseVersion == MessageParseVersionLatest {
 			break
