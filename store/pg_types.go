@@ -276,4 +276,12 @@ func init() {
 		{Field: "Preview", Column: "preview"},
 		{Field: "ParsedBuf", Column: "parsed_buf"},
 	}))
+
+	registerPgType(buildSimpleHandler[Organization]("organization", []pgFieldSpec{
+		{Field: "ID", Column: "id", PK: true},
+		{Field: "Name", Column: "name"},
+		{Field: "Slug", Column: "slug"},
+		{Field: "CreatedAt", Column: "created_at"},
+		{Field: "SuspendedAt", Column: "suspended_at"},
+	}))
 }

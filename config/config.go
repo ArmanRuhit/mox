@@ -306,6 +306,7 @@ type TransportFail struct {
 }
 
 type Domain struct {
+	OrgID                       int64            `sconf:"optional" sconf-doc:"Organization this domain belongs to. 0 means default org"`
 	Disabled                    bool             `sconf:"optional" sconf-doc:"Disabled domains can be useful during/before migrations. Domains that are disabled can still be configured like normal, including adding addresses using the domain to accounts. However, disabled domains: 1. Do not try to fetch ACME certificates. TLS connections to host names involving the email domain will fail. A TLS certificate for the hostname (that wil be used as MX) itself will be requested. 2. Incoming deliveries over SMTP are rejected with a temporary error '450 4.2.1 recipient domain temporarily disabled'. 3. Submissions over SMTP using an (envelope) SMTP MAIL FROM address or message 'From' address of a disabled domain will be rejected with a temporary error '451 4.3.0 sender domain temporarily disabled'. Note that accounts with addresses at disabled domains can still log in and read email (unless the account itself is disabled)."`
 	Description                 string           `sconf:"optional" sconf-doc:"Free-form description of domain."`
 	ClientSettingsDomain        string           `sconf:"optional" sconf-doc:"Hostname for client settings instead of the mail server hostname. E.g. mail.<domain>. For future migration to another mail operator without requiring all clients to update their settings, it is convenient to have client settings that reference a subdomain of the hosted domain instead of the hostname of the server where the mail is currently hosted. If empty, the hostname of the mail server is used for client configurations. Unicode name."`
@@ -444,6 +445,7 @@ type AutomaticJunkFlags struct {
 }
 
 type Account struct {
+	OrgID                    int64            `sconf:"optional" sconf-doc:"Organization this domain belongs to. 0 means default org"`
 	OutgoingWebhook          *OutgoingWebhook `sconf:"optional" sconf-doc:"Webhooks for events about outgoing deliveries."`
 	IncomingWebhook          *IncomingWebhook `sconf:"optional" sconf-doc:"Webhooks for events about incoming deliveries over SMTP."`
 	FromIDLoginAddresses     []string         `sconf:"optional" sconf-doc:"Login addresses that cause outgoing email to be sent with SMTP MAIL FROM addresses with a unique id after the localpart catchall separator (which must be enabled when addresses are specified here). Any delivery status notifications (DSN, e.g. for bounces), can be related to the original message and recipient with unique id's. You can login to an account with any valid email address, including variants with the localpart catchall separator. You can use this mechanism to both send outgoing messages with and without unique fromid for a given email address. With the webapi and webmail, a unique id will be generated. For submission, the id from the SMTP MAIL FROM command is used if present, and a unique id is generated otherwise."`

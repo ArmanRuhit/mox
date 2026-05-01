@@ -25,7 +25,7 @@ type AccountRemove struct {
 
 // AuthDB and AuthDBTypes are exported for ../backup.go.
 var AuthDB DB
-var AuthDBTypes = []any{TLSPublicKey{}, LoginAttempt{}, LoginAttemptState{}, AccountRemove{}}
+var AuthDBTypes = []any{TLSPublicKey{}, LoginAttempt{}, LoginAttemptState{}, AccountRemove{}, Organization{}}
 
 var loginAttemptCleanerStop chan chan struct{}
 
@@ -45,6 +45,10 @@ func Init(ctx context.Context) error {
 		if err := EnsureSchema(ctx, Pool(), "auth", "auth"); err != nil {
 			return fmt.Errorf("ensure auth schema: %w", err)
 		}
+
+		if err := EnsureSchema(ctx, Pool(), "org", "org"); err != nil {
+			return fmt.Errorf("ensure org schema: %w", err)
+		}
 		AuthDB = NewPgDB(Pool(), "auth")
 	} else {
 		p := mox.DataDirPath("auth.db")
@@ -55,6 +59,17 @@ func Init(ctx context.Context) error {
 			return err
 		}
 		AuthDB = NewBstoreDB(db)
+	}
+
+	_, err := OpenOrg(ctx, 1)
+
+	if err != nil { //org doesn't exist yet
+		now := time.Now()
+		if err2 := AuthDB.Insert(ctx, &Organization{
+			ID: 1, Name: "Default", Slug: "default", CreatedAt: now,
+		}); err2 != nil {
+			return fmt.Errorf("create default org: %w", err2)
+		}
 	}
 
 	// List pending account removals, and process them one by one, committing each
