@@ -1,0 +1,2 @@
+# Ensure testdata config files always use LF so sconf parser doesn't choke on \r
+testdata/**/*.conf text eol=lf
