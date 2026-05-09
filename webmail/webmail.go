@@ -343,6 +343,12 @@ func handle(apiHandler http.Handler, isForwarded bool, accountPath string, w htt
 		}
 		reqInfo := requestInfo{log, loginAddress, acc, sessionToken, w, r}
 		ctx = context.WithValue(ctx, requestInfoCtxKey, reqInfo)
+		// Extract org ID from authenticated account and add to context
+		if accName != "" {
+			if accConf, ok := mox.Conf.Account(accName); ok {
+				ctx = store.WithOrgID(ctx, store.NormalizeOrgID(accConf.OrgID))
+			}
+		}
 		apiHandler.ServeHTTP(w, r.WithContext(ctx))
 		return
 	}

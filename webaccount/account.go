@@ -249,6 +249,12 @@ func handle(apiHandler http.Handler, isForwarded bool, w http.ResponseWriter, r 
 	if isAPI {
 		reqInfo := requestInfo{loginAddress, accName, sessionToken, w, r}
 		ctx = context.WithValue(ctx, requestInfoCtxKey, reqInfo)
+		// Extract org ID from authenticated account and add to context
+		if accName != "" {
+			if acc, ok := mox.Conf.Account(accName); ok {
+				ctx = store.WithOrgID(ctx, store.NormalizeOrgID(acc.OrgID))
+			}
+		}
 		apiHandler.ServeHTTP(w, r.WithContext(ctx))
 		return
 	}

@@ -186,9 +186,10 @@ func handle(apiHandler http.Handler, isForwarded bool, w http.ResponseWriter, r 
 
 	// All other URLs, except the login endpoint require some authentication.
 	var sessionToken store.SessionToken
+	var accountName string
 	if r.URL.Path != "/api/LoginPrep" && r.URL.Path != "/api/Login" {
 		var ok bool
-		_, sessionToken, _, ok = webauth.Check(ctx, log, webauth.Admin, "webadmin", isForwarded, w, r, isAPI, isAPI, false)
+			accountName, sessionToken, _, ok = webauth.Check(ctx, log, webauth.Admin, "webadmin", isForwarded, w, r, isAPI, isAPI, false)
 		if !ok {
 			// Response has been written already.
 			return
@@ -197,6 +198,12 @@ func handle(apiHandler http.Handler, isForwarded bool, w http.ResponseWriter, r 
 
 	if isAPI {
 		reqInfo := requestInfo{sessionToken, w, r}
+		// extract org id from authenticated account and add to context
+		if accountName != "" {
+			if acc, ok := mox.Conf.Account(accountName); ok {
+				ctx = store.WithOrgID(ctx, store.NormalizeOrgID(acc.OrgID))
+			}
+		}
 		ctx = context.WithValue(ctx, requestInfoCtxKey, reqInfo)
 		apiHandler.ServeHTTP(w, r.WithContext(ctx))
 		return

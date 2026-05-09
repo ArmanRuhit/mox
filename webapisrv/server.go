@@ -450,6 +450,12 @@ func (s server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	la.Result = store.AuthSuccess
 	mox.LimiterFailedAuth.Reset(clientIP, t0)
 
+	// Add OrgID to context for multi-tenancy
+	if conf, ok := mox.Conf.Account(acc.Name); ok {
+		ctxOrgID := store.NormalizeOrgID(conf.OrgID)
+		r = r.WithContext(store.WithOrgID(r.Context(), ctxOrgID))
+	}
+
 	ct := r.Header.Get("Content-Type")
 	ct, _, err = mime.ParseMediaType(ct)
 	if err != nil {
